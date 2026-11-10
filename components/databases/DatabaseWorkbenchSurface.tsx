@@ -1866,15 +1866,18 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
               <div
                 key={cellIndex}
                 className={cn(
-                  'group/cell relative truncate px-3 font-mono',
-                  canPreview && 'pr-7',
+                  'relative truncate px-3 font-mono',
+                  // The preview affordance is a CSS pseudo-element (see
+                  // .nc-result-cell-preview): a real button + icon per cell
+                  // quadrupled the DOM and made every hover repaint slow.
+                  canPreview && 'nc-result-cell-preview pr-7',
                   value !== null && 'cursor-pointer hover:bg-secondary/40',
                   value === null && 'italic text-muted-foreground/70',
                   typeof value === 'number' && 'text-right tabular-nums',
                   selectedColumns.includes(cellIndex) && 'bg-primary/5',
                   isMatch && 'bg-amber-400/30 ring-1 ring-inset ring-amber-500/70',
                 )}
-                title={text}
+                title={canPreview ? `${text}\n\n${t('databases.workbench.previewCell')} ↗` : text}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   onOpenMenu({
@@ -1888,26 +1891,19 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
                   if (!editable || saving) return;
                   onBeginEdit(row.sourceIndex, cellIndex, cellText(value));
                 }}
-                onClick={() => {
+                onClick={(event) => {
+                  if (canPreview) {
+                    const box = event.currentTarget.getBoundingClientRect();
+                    if (box.right - event.clientX <= RESULT_CELL_PREVIEW_ZONE) {
+                      onPreview(cellIndex, text);
+                      return;
+                    }
+                  }
                   if (value === null) return;
                   onCopyCell(String(value));
                 }}
               >
                 {text}
-                {canPreview ? (
-                  <button
-                    type="button"
-                    aria-label={t('databases.workbench.previewCell')}
-                    title={t('databases.workbench.previewCell')}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 rounded bg-background/80 p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/cell:opacity-100"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onPreview(cellIndex, text);
-                    }}
-                  >
-                    <Eye className="h-3 w-3" />
-                  </button>
-                ) : null}
               </div>
             );
           })}
@@ -1918,8 +1914,11 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
 const ROW_NUMBER_WIDTH = 44;
 const ROW_NUMBER_ITEM_HEIGHT = 28;
 // Scrolling runs on the compositor and can outrun a React render by a frame or
-// two; this many rows above and below the viewport keep that gap filled.
-const RESULT_ROW_OVERSCAN = 16;
+// two; this many rows above and below the viewport keep that gap filled. Not
+// more: hovering repaints the whole grid layer, which scales with mounted rows.
+const RESULT_ROW_OVERSCAN = 10;
+// Width of the hover icon's click zone at the right edge of a cell.
+const RESULT_CELL_PREVIEW_ZONE = 24;
 // The header and the row numbers are sticky inside the scroller, so rows pass
 // underneath them: they need an opaque base under the translucent tint.
 const RESULT_HEADER_SURFACE: React.CSSProperties = {

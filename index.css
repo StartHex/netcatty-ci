@@ -2338,6 +2338,25 @@ html[data-theme-transition] *::after {
   animation: nc-progress-indeterminate 1.15s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
+/* Result grid: "preview" icon drawn on hover without a DOM node per cell.
+   Clicks in this zone are routed to the preview by the cell's handler. */
+@media (hover: hover) {
+  .nc-result-cell-preview:hover::after {
+    content: "";
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    width: 16px;
+    height: 16px;
+    translate: 0 -50%;
+    border-radius: 4px;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E")
+        center / 12px 12px no-repeat,
+      hsl(var(--background) / 0.85);
+  }
+}
+
 /* Previous results stay visible but dimmed while a new run is in flight. */
 .nc-stale-content {
   transition: opacity 200ms ease, filter 200ms ease;
