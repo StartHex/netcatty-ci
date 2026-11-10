@@ -38,10 +38,17 @@ import { toast } from "./ui/toast";
 import {
   VaultHeaderSearch,
   VaultPageHeader,
-  vaultHeaderIconButtonClass,
   vaultHeaderSecondaryButtonClass,
   vaultSectionTitleClass,
 } from "./vault/VaultPageHeader";
+import { VaultEntityIcon, vaultKeyIconClass } from "./vault/VaultEntityIcon";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "./ui/context-menu";
 import { SystemPanelConfirmDialog } from "./systemManager/SystemPanelConfirmDialog";
 
 function LocalClock() {
@@ -306,67 +313,61 @@ export const OtpAuthenticatorsManager: React.FC<OtpAuthenticatorsManagerProps> =
             ) : (
               <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {filtered.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className={cn(
-                      "soft-card elevate rounded-xl px-3 py-2 group",
-                      draft?.id === entry.id && "ring-2 ring-primary",
-                    )}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="h-9 w-9 shrink-0 rounded-lg bg-secondary/80 flex items-center justify-center">
-                        <KeyRound size={18} className="text-muted-foreground" />
-                      </div>
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 text-left focus-visible:outline-none"
-                        onClick={() => openEdit(entry)}
-                      >
-                        <div className="text-sm font-semibold truncate">{entry.label}</div>
-                        <div className="text-[11px] font-mono text-muted-foreground truncate">
-                          {entry.algorithm} · {entry.digits} {t("otpAuthenticators.field.digitsShort")} · {entry.period}s
-                        </div>
-                        <div className="text-[11px] text-muted-foreground truncate">
-                          {t("otpAuthenticators.usage", { count: referenceCounts.get(entry.id) ?? 0 })}
-                        </div>
-                      </button>
-                      <div className="flex flex-col items-end gap-1">
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className={vaultHeaderIconButtonClass}
-                            aria-label={t("otpAuthenticators.action.copyCode")}
-                            onClick={() => { void copyCode(entry); }}
-                            disabled={!entry.secret}
-                          >
-                            <Copy size={14} />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className={vaultHeaderIconButtonClass}
-                            aria-label={t("action.edit")}
-                            onClick={() => openEdit(entry)}
-                          >
-                            <Pencil size={14} />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className={cn(vaultHeaderIconButtonClass, "text-destructive")}
-                            aria-label={t("action.delete")}
-                            onClick={() => setDeleteTarget(entry)}
-                          >
-                            <Trash2 size={14} />
-                          </Button>
-                        </div>
-                        {!entry.secret && (
-                          <span className="text-[10px] text-destructive">{t("otpAuthenticators.missingSecret")}</span>
+                  <ContextMenu key={entry.id}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className={cn(
+                          "soft-card elevate group relative flex h-[68px] items-center gap-3 rounded-xl px-3 py-2 focus-within:ring-2 focus-within:ring-ring",
+                          draft?.id === entry.id && "ring-2 ring-primary",
                         )}
+                      >
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none"
+                          onClick={() => openEdit(entry)}
+                        >
+                          <VaultEntityIcon className={vaultKeyIconClass} icon={<KeyRound size={18} />} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold">{entry.label}</span>
+                            <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                              {entry.algorithm} · {entry.digits} {t("otpAuthenticators.field.digitsShort")} · {entry.period}s
+                            </span>
+                            <span className={cn("block truncate text-[11px]", entry.secret ? "text-muted-foreground" : "text-destructive")}>
+                              {entry.secret
+                                ? t("otpAuthenticators.usage", { count: referenceCounts.get(entry.id) ?? 0 })
+                                : t("otpAuthenticators.missingSecret")}
+                            </span>
+                          </span>
+                        </button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                          aria-label={t("otpAuthenticators.action.copyCode")}
+                          title={t("otpAuthenticators.action.copyCode")}
+                          onClick={() => { void copyCode(entry); }}
+                          disabled={!entry.secret}
+                        >
+                          <Copy size={14} />
+                        </Button>
                       </div>
-                    </div>
-                  </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem onClick={() => { void copyCode(entry); }} disabled={!entry.secret}>
+                        <Copy size={14} className="mr-2" />
+                        {t("otpAuthenticators.action.copyCode")}
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => openEdit(entry)}>
+                        <Pencil size={14} className="mr-2" />
+                        {t("action.edit")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onClick={() => setDeleteTarget(entry)} className="text-destructive focus:text-destructive">
+                        <Trash2 size={14} className="mr-2" />
+                        {t("action.delete")}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 ))}
               </div>
             )}

@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock, Copy, History, Loader2, PanelBottom, PanelRight, Play, Plus, Save, Square, Wand2, X } from 'lucide-react';
+import { Clock, Copy, History, Loader2, PanelBottom, PanelRight, Play, Plus, Save, Wand2, X } from 'lucide-react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useHttpClient, type CurlTab } from '../../application/state/useHttpClient';
@@ -98,6 +98,67 @@ const statusTone = (status: number): string => {
   return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
 };
 
+/**
+ * Compact segmented control used for every view switch in the curl tool, so
+ * the request sections, the response sections and the tree / text toggle all
+ * look and behave the same (same look as the shared ui/tabs, one size down).
+ */
+function SegmentedTabs<T extends string>({
+  items,
+  value,
+  onChange,
+  ariaLabel,
+  className,
+}: {
+  items: readonly { value: T; label: string; count?: number }[];
+  value: T;
+  onChange: (value: T) => void;
+  ariaLabel?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
+      className={cn('inline-flex h-8 shrink-0 items-center rounded-md bg-muted p-0.5 text-muted-foreground', className)}
+    >
+      {items.map((item) => {
+        const active = item.value === value;
+        return (
+          <button
+            key={item.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(item.value)}
+            className={cn(
+              'nc-tab-button inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-sm px-2.5 text-xs font-medium',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              active ? 'bg-background text-foreground shadow-sm' : 'hover:text-foreground',
+            )}
+          >
+            {item.label}
+            {item.count ? (
+              <span
+                className={cn(
+                  'rounded-full px-1.5 text-[10px] leading-4 tabular-nums',
+                  active ? 'bg-primary/15 text-primary' : 'bg-foreground/10',
+                )}
+              >
+                {item.count}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Rows that will actually be sent: enabled and with a name. */
+const countActiveRows = (rows: readonly HttpKeyValue[]): number =>
+  rows.filter((row) => row.enabled && row.key.trim() !== '').length;
+
 const KeyValueEditor: React.FC<{
   rows: HttpKeyValue[];
   keyPlaceholder: string;
@@ -106,46 +167,74 @@ const KeyValueEditor: React.FC<{
   onChange: (rowId: string, patch: Partial<HttpKeyValue>) => void;
   onAdd: () => void;
   onRemove: (rowId: string) => void;
-}> = ({ rows, keyPlaceholder, valuePlaceholder, sensitive, onChange, onAdd, onRemove }) => (
-  <div className="space-y-2">
-    <div className="grid grid-cols-[24px_1fr_1fr_32px] items-center gap-2 px-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-      <span />
-      <span>{keyPlaceholder}</span>
-      <span>{valuePlaceholder}</span>
-      <span />
-    </div>
-    {rows.map((row) => (
-      <div key={row.id} className="grid grid-cols-[24px_1fr_1fr_32px] items-center gap-2">
-        <input
-          type="checkbox"
-          checked={row.enabled}
-          onChange={(event) => onChange(row.id, { enabled: event.target.checked })}
-          aria-label="toggle row"
-          className="h-3.5 w-3.5 accent-primary"
-        />
-        <Input
-          value={row.key}
-          placeholder={keyPlaceholder}
-          onChange={(event) => onChange(row.id, { key: event.target.value })}
-          className="h-8 font-mono text-xs"
-        />
-        <Input
-          value={row.value}
-          placeholder={valuePlaceholder}
-          type={sensitive && isSensitiveHeaderName(row.key) ? 'password' : 'text'}
-          onChange={(event) => onChange(row.id, { value: event.target.value })}
-          className="h-8 font-mono text-xs"
-        />
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => onRemove(row.id)}>
-          <X size={14} />
-        </Button>
+}> = ({ rows, keyPlaceholder, valuePlaceholder, sensitive, onChange, onAdd, onRemove }) => {
+  const { t } = useI18n();
+  const cellInputClass =
+    'h-8 rounded-none border-0 bg-transparent px-2 font-mono text-xs shadow-none focus-visible:bg-muted/40 focus-visible:ring-0 focus-visible:ring-offset-0';
+  return (
+    <div className="space-y-2">
+      {/* One bordered table instead of loose inputs: rows line up and the
+          section reads like the header tables in the response pane. */}
+      <div className="overflow-hidden rounded-md border border-input bg-background">
+        <div className="grid grid-cols-[32px_minmax(0,1fr)_minmax(0,1.4fr)_32px] items-center border-b border-border/60 bg-muted/40 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <span />
+          <span className="px-2 py-1.5">{keyPlaceholder}</span>
+          <span className="border-l border-border/60 px-2 py-1.5">{valuePlaceholder}</span>
+          <span />
+        </div>
+        {rows.length === 0 ? (
+          <p className="px-3 py-3 text-center text-xs text-muted-foreground">{t('curl.rows.empty')}</p>
+        ) : null}
+        {rows.map((row) => (
+          <div
+            key={row.id}
+            className={cn(
+              'group grid grid-cols-[32px_minmax(0,1fr)_minmax(0,1.4fr)_32px] items-center border-b border-border/40 last:border-b-0',
+              !row.enabled && 'opacity-55',
+            )}
+          >
+            <span className="flex items-center justify-center">
+              <input
+                type="checkbox"
+                checked={row.enabled}
+                onChange={(event) => onChange(row.id, { enabled: event.target.checked })}
+                aria-label={t('curl.rows.toggle')}
+                title={t('curl.rows.toggle')}
+                className="h-3.5 w-3.5 cursor-pointer accent-primary"
+              />
+            </span>
+            <Input
+              value={row.key}
+              placeholder={keyPlaceholder}
+              onChange={(event) => onChange(row.id, { key: event.target.value })}
+              className={cellInputClass}
+            />
+            <Input
+              value={row.value}
+              placeholder={valuePlaceholder}
+              type={sensitive && isSensitiveHeaderName(row.key) ? 'password' : 'text'}
+              onChange={(event) => onChange(row.id, { value: event.target.value })}
+              className={cn(cellInputClass, 'border-l border-border/40')}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-none text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+              aria-label={t('curl.rows.remove')}
+              title={t('curl.rows.remove')}
+              onClick={() => onRemove(row.id)}
+            >
+              <X size={14} />
+            </Button>
+          </div>
+        ))}
       </div>
-    ))}
-    <Button variant="ghost" size="sm" className="h-8 gap-1 text-xs" onClick={onAdd}>
-      <Plus size={14} /> {keyPlaceholder}
-    </Button>
-  </div>
-);
+      <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" onClick={onAdd}>
+        <Plus size={14} /> {t('curl.rows.add')}
+      </Button>
+    </div>
+  );
+};
 
 const PortInput: React.FC<{
   value: number | null;
@@ -187,7 +276,7 @@ const PortInput: React.FC<{
         value={text}
         placeholder={placeholder}
         onChange={(event) => commit(event.target.value)}
-        className={cn('h-9 font-mono text-xs', invalid && 'border-destructive text-destructive')}
+        className={cn('h-8 font-mono text-xs', invalid && 'border-destructive text-destructive')}
         aria-invalid={invalid || undefined}
         aria-label={placeholder}
       />
@@ -205,7 +294,11 @@ const UrlBar: React.FC<{
   onSubmit: () => void;
   invalidPortLabel: string;
   invalidHostLabel: string;
-}> = ({ tab, onUrlChange, onPartsChange, onSubmit, invalidPortLabel, invalidHostLabel }) => {
+  /** Rendered left of the URL field (method picker). */
+  leading?: React.ReactNode;
+  /** Rendered right of the URL field (send / cancel). */
+  trailing?: React.ReactNode;
+}> = ({ tab, onUrlChange, onPartsChange, onSubmit, invalidPortLabel, invalidHostLabel, leading, trailing }) => {
   const { t } = useI18n();
   const parsed = useMemo(() => parseHttpUrl(tab.draft.url), [tab.draft.url]);
   // tsconfig has strictNullChecks off, so discriminated unions do not narrow here.
@@ -221,6 +314,7 @@ const UrlBar: React.FC<{
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
+        {leading}
         <Input
           value={tab.draft.url}
           placeholder="https://api.example.com/v1/items?page=1"
@@ -234,13 +328,14 @@ const UrlBar: React.FC<{
           aria-invalid={urlInvalid || undefined}
           data-testid="curl-url-input"
         />
+        {trailing}
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Select
           value={parts.scheme}
           onValueChange={(value) => onPartsChange({ scheme: value === 'http' ? 'http' : 'https' })}
         >
-          <SelectTrigger className="h-9 w-[104px] font-mono text-xs">
+          <SelectTrigger className="h-8 w-[96px] font-mono text-xs text-muted-foreground" aria-label={t('curl.url.scheme')}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -252,7 +347,7 @@ const UrlBar: React.FC<{
           value={parts.host}
           placeholder={t('curl.url.host')}
           onChange={(event) => onPartsChange({ host: event.target.value })}
-          className="h-9 flex-1 min-w-[160px] font-mono text-xs"
+          className="h-8 flex-1 min-w-[160px] font-mono text-xs"
           data-testid="curl-host-input"
         />
         <PortInput
@@ -265,7 +360,7 @@ const UrlBar: React.FC<{
           value={parts.path}
           placeholder={t('curl.url.path')}
           onChange={(event) => onPartsChange({ path: event.target.value })}
-          className="h-9 flex-1 min-w-[140px] font-mono text-xs"
+          className="h-8 flex-1 min-w-[140px] font-mono text-xs"
           data-testid="curl-path-input"
         />
       </div>
@@ -423,24 +518,17 @@ const ResponsePanel = memo(function ResponsePanel({
           {section === 'body' && !isBinary ? (
             <>
               {isJson ? (
-                <div className="flex items-center gap-0.5 rounded border border-border/60 p-0.5">
-                  {(['tree', 'raw'] as const).map((view) => (
-                    <button
-                      key={view}
-                      type="button"
-                      onClick={() => setBodyView(view)}
-                      className={cn(
-                        'nc-tab-button rounded px-1.5 py-0.5 text-[11px]',
-                        bodyView === view ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
-                      )}
-                    >
-                      {t(view === 'tree' ? 'curl.body.viewTree' : 'curl.body.viewText')}
-                    </button>
-                  ))}
-                </div>
+                <SegmentedTabs
+                  value={bodyView}
+                  onChange={setBodyView}
+                  items={[
+                    { value: 'tree', label: t('curl.body.viewTree') },
+                    { value: 'raw', label: t('curl.body.viewText') },
+                  ]}
+                />
               ) : null}
               <Select value={encoding} onValueChange={(value) => setEncoding(normalizeResponseEncoding(value))}>
-                <SelectTrigger className="h-7 w-[136px] text-[11px]" aria-label={t('curl.response.encoding')}>
+                <SelectTrigger className="h-8 w-[136px] text-xs" aria-label={t('curl.response.encoding')}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -454,7 +542,7 @@ const ResponsePanel = memo(function ResponsePanel({
               <Button
                 size="sm"
                 variant="ghost"
-                className="h-7 gap-1 px-2 text-[11px]"
+                className="h-8 gap-1 px-2 text-xs"
                 onClick={() =>
                   void copyTextWithFeedback(
                     writeClipboard,
@@ -468,19 +556,15 @@ const ResponsePanel = memo(function ResponsePanel({
               </Button>
             </>
           ) : null}
-          {RESPONSE_SECTIONS.map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setSection(item)}
-              className={cn(
-                'nc-tab-button rounded px-2 py-1 text-xs',
-                section === item ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {t(`curl.response.${item}`)}
-            </button>
-          ))}
+          <SegmentedTabs
+            value={section}
+            onChange={setSection}
+            items={RESPONSE_SECTIONS.map((item) => ({
+              value: item,
+              label: t(`curl.response.${item}`),
+              ...(item === 'headers' ? { count: response.headers.length } : {}),
+            }))}
+          />
         </div>
       </div>
       {bodyClipped && section !== 'headers' ? (
@@ -525,13 +609,18 @@ const ResponsePanel = memo(function ResponsePanel({
           />
         ) : null}
         {section === 'headers' ? (
-          <div className="p-3 font-mono text-xs">
-            {response.headers.map((header, index) => (
-              <div key={`${header.key}-${index}`} className="flex gap-2 border-b border-border/40 py-1 last:border-b-0">
-                <span className="w-56 shrink-0 text-muted-foreground">{header.key}</span>
-                <span className="break-all">{header.value}</span>
-              </div>
-            ))}
+          <div className="p-3">
+            <div className="overflow-hidden rounded-md border border-input font-mono text-xs">
+              {response.headers.map((header, index) => (
+                <div
+                  key={`${header.key}-${index}`}
+                  className="grid grid-cols-[minmax(120px,240px)_minmax(0,1fr)] border-b border-border/40 last:border-b-0"
+                >
+                  <span className="truncate bg-muted/40 px-2 py-1.5 text-muted-foreground" title={header.key}>{header.key}</span>
+                  <span className="select-text break-all px-2 py-1.5">{header.value}</span>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
       </ScrollArea>
@@ -638,111 +727,79 @@ export const CurlClientSurface: React.FC<{
         sendActive();
       }}
     >
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
-        <Select
-          value={tab.draft.method}
-          onValueChange={(value) => {
-            client.patchDraft(tab.id, { method: value as HttpMethod });
-          }}
-        >
-          <SelectTrigger className={cn('h-9 w-[110px] font-mono text-xs font-semibold', METHOD_CLASS[tab.draft.method])}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {HTTP_METHODS.map((method) => (
-              <SelectItem key={method} value={method} className={cn('font-mono', METHOD_CLASS[method])}>
-                {method}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Button
-          size="sm"
-          className="h-9 min-w-[76px] gap-1 transition-all"
-          onClick={sendActive}
-          disabled={sending}
-          title={t('curl.sendShortcut')}
-          data-testid="curl-send"
-        >
-          {sending ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} {t('curl.send')}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-9 gap-1"
-          onClick={() => client.cancel(tab.id)}
-          disabled={!sending}
-        >
-          <Square size={14} /> {t('curl.cancel')}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-9 gap-1"
-          onClick={() => {
-            void client.saveTab(tab.id).then(() => toast.success(t('curl.saved')));
-          }}
-        >
-          <Save size={14} /> {t('curl.save')}
-        </Button>
+      {/* Row 1: what this request is (name, saved state) and its bookkeeping. */}
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5">
         <Input
           value={tab.draft.name}
           placeholder={t('curl.form.name')}
+          aria-label={t('curl.form.name')}
           onChange={(event) => client.patchDraft(tab.id, { name: event.target.value })}
-          className="h-9 w-[200px] text-xs"
+          className="h-8 min-w-0 max-w-[320px] flex-1 border-transparent bg-transparent px-2 text-sm font-medium shadow-none hover:border-input focus-visible:border-input"
         />
         <span
           key={tab.dirty ? 'dirty' : 'clean'}
           className={cn(
-            'nc-anim-fade-in text-[11px]',
+            'nc-anim-fade-in flex shrink-0 items-center gap-1.5 text-[11px]',
             tab.dirty ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
           )}
         >
+          <span className={cn('h-1.5 w-1.5 rounded-full', tab.dirty ? 'bg-amber-500' : 'bg-emerald-500/70')} aria-hidden="true" />
           {tab.dirty ? t('curl.unsaved') : t('curl.savedState')}
         </span>
-
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button size="sm" variant="ghost" className="ml-auto h-9 gap-1">
-              <History size={14} /> {t('curl.history.title')}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-[440px] p-0">
-            {client.history.entries.length === 0 ? (
-              <p className="p-3 text-xs text-muted-foreground">{t('curl.history.empty')}</p>
-            ) : (
-              <ScrollArea className="max-h-[360px]">
-                <div className="p-1">
-                  {client.history.entries.slice(0, 40).map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-                      onClick={() => setHistoryEntry(entry)}
-                    >
-                      <span className={cn('w-14 shrink-0 font-mono font-semibold', METHOD_CLASS[entry.method as HttpMethod])}>
-                        {entry.method}
-                      </span>
-                      <span className="truncate font-mono">{entry.url}</span>
-                      <span className="ml-auto shrink-0 text-muted-foreground">{entry.status || '—'}</span>
-                      <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
-                        {new Date(entry.at).toLocaleTimeString()}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </ScrollArea>
-            )}
-            <div className="border-t border-border/60 p-1">
-              <Button variant="ghost" size="sm" className="w-full justify-start text-xs" onClick={client.history.clear}>
-                {t('curl.history.clear')}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-8 gap-1 px-2 text-xs"
+            onClick={() => {
+              void client.saveTab(tab.id).then(() => toast.success(t('curl.saved')));
+            }}
+          >
+            <Save size={14} /> {t('curl.save')}
+          </Button>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button size="sm" variant="ghost" className="h-8 gap-1 px-2 text-xs">
+                <History size={14} /> {t('curl.history.title')}
               </Button>
-            </div>
-          </PopoverContent>
-        </Popover>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-[440px] p-0">
+              {client.history.entries.length === 0 ? (
+                <p className="p-3 text-xs text-muted-foreground">{t('curl.history.empty')}</p>
+              ) : (
+                <ScrollArea className="max-h-[360px]">
+                  <div className="p-1">
+                    {client.history.entries.slice(0, 40).map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                        onClick={() => setHistoryEntry(entry)}
+                      >
+                        <span className={cn('w-14 shrink-0 font-mono font-semibold', METHOD_CLASS[entry.method as HttpMethod])}>
+                          {entry.method}
+                        </span>
+                        <span className="truncate font-mono">{entry.url}</span>
+                        <span className="ml-auto shrink-0 text-muted-foreground">{entry.status || '—'}</span>
+                        <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
+                          {new Date(entry.at).toLocaleTimeString()}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+              <div className="border-t border-border/60 p-1">
+                <Button variant="ghost" size="sm" className="w-full justify-start text-xs" onClick={client.history.clear}>
+                  {t('curl.history.clear')}
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
       </div>
 
+      {/* Row 2: method + URL + send, the line you actually work on. */}
       <div className="border-b border-border/60 px-3 py-2">
         <UrlBar
           tab={tab}
@@ -751,6 +808,49 @@ export const CurlClientSurface: React.FC<{
           onSubmit={sendActive}
           invalidPortLabel={invalidPortLabel}
           invalidHostLabel={invalidHostLabel}
+          leading={(
+            <Select
+              value={tab.draft.method}
+              onValueChange={(value) => {
+                client.patchDraft(tab.id, { method: value as HttpMethod });
+              }}
+            >
+              <SelectTrigger
+                className={cn('h-9 w-[108px] shrink-0 font-mono text-xs font-semibold', METHOD_CLASS[tab.draft.method])}
+                aria-label={t('curl.form.method')}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {HTTP_METHODS.map((method) => (
+                  <SelectItem key={method} value={method} className={cn('font-mono', METHOD_CLASS[method])}>
+                    {method}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          trailing={sending ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="nc-anim-fade-in h-9 min-w-[84px] shrink-0 gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              onClick={() => client.cancel(tab.id)}
+              data-testid="curl-cancel"
+            >
+              <Loader2 size={14} className="animate-spin" /> {t('curl.cancel')}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="h-9 min-w-[84px] shrink-0 gap-1.5"
+              onClick={sendActive}
+              title={t('curl.sendShortcut')}
+              data-testid="curl-send"
+            >
+              <Play size={14} /> {t('curl.send')}
+            </Button>
+          )}
         />
       </div>
 
@@ -766,28 +866,27 @@ export const CurlClientSurface: React.FC<{
         top={
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b border-border/60 px-3 py-1.5">
-            {REQUEST_SECTIONS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setSection(item)}
-                className={cn(
-                  'nc-tab-button rounded px-2 py-1 text-xs',
-                  section === item ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                {t(`curl.request.${item}`)}
-              </button>
-            ))}
+            <SegmentedTabs
+              value={section}
+              onChange={setSection}
+              items={REQUEST_SECTIONS.map((item) => ({
+                value: item,
+                label: t(`curl.request.${item}`),
+                ...(item === 'params' ? { count: countActiveRows(tab.draft.params) } : {}),
+                ...(item === 'headers' ? { count: countActiveRows(tab.draft.headers) } : {}),
+                ...(item === 'cookies' ? { count: countActiveRows(tab.draft.cookies) } : {}),
+                ...(item === 'body' && tab.draft.body.kind !== 'none' && tab.draft.body.text ? { count: 1 } : {}),
+              }))}
+            />
             <button
               type="button"
-              className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="ml-auto flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="curl-response-layout-toggle"
               aria-label={t(responseLayout === 'right' ? 'curl.layout.responseBottom' : 'curl.layout.responseRight')}
               title={t(responseLayout === 'right' ? 'curl.layout.responseBottom' : 'curl.layout.responseRight')}
               onClick={() => setResponseLayout(responseLayout === 'right' ? 'bottom' : 'right')}
             >
-              {responseLayout === 'right' ? <PanelBottom size={14} /> : <PanelRight size={14} />}
+              {responseLayout === 'right' ? <PanelBottom size={16} /> : <PanelRight size={16} />}
             </button>
           </div>
           {section === 'body' ? null : (
@@ -1064,7 +1163,7 @@ export const CurlClientSurface: React.FC<{
                     </p>
                   ) : null}
                   {bodyIsJson && bodyView === 'tree' ? (
-                    <div className="min-h-[200px] flex-1 overflow-auto rounded border border-border/60">
+                    <div className="min-h-[200px] flex-1 overflow-auto rounded-md border border-input bg-background">
                       <JsonTreeViewer
                         text={tab.draft.body.text}
                         labels={{
