@@ -266,6 +266,66 @@ test("readSqlFile reads utf8 scripts and rejects missing paths", async () => {
   fs.unlinkSync(file);
 });
 
+test("saveTextFile overwrites only files the user picked in a dialog", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const Module = require("node:module");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-sql-save-"));
+  const opened = path.join(dir, "opened.sql");
+  const foreign = path.join(dir, "foreign.sql");
+  const picked = path.join(dir, "picked.sql");
+  fs.writeFileSync(opened, "select 1;", "utf8");
+  fs.writeFileSync(foreign, "keep me", "utf8");
+
+  // Stand-in for electron's dialog: records the options, "picks" picked.sql.
+  const dialogCalls = [];
+  const originalLoad = Module._load;
+  Module._load = function patched(request, ...rest) {
+    if (request === "electron") {
+      return {
+        dialog: {
+          showSaveDialog: async (options) => {
+            dialogCalls.push(options);
+            return { canceled: false, filePath: picked };
+          },
+        },
+      };
+    }
+    return originalLoad.call(this, request, ...rest);
+  };
+  try {
+    // Opened through readSqlFile -> direct overwrite, no dialog.
+    assert.equal((await bridge.readSqlFile(opened)).ok, true);
+    const direct = await bridge.saveTextFile({ path: opened, content: "select 2;" });
+    assert.deepEqual(direct, { ok: true, path: opened });
+    assert.equal(fs.readFileSync(opened, "utf8"), "select 2;");
+    assert.equal(dialogCalls.length, 0);
+
+    // A path the user never picked is not written: the dialog decides.
+    const redirected = await bridge.saveTextFile({
+      path: foreign,
+      content: "select 3;",
+      filters: [{ name: "SQL", extensions: ["sql"] }, { name: "bad", extensions: ["../x"] }],
+    });
+    assert.deepEqual(redirected, { ok: true, path: picked });
+    assert.equal(fs.readFileSync(foreign, "utf8"), "keep me");
+    assert.equal(fs.readFileSync(picked, "utf8"), "select 3;");
+    assert.equal(dialogCalls.length, 1);
+    assert.equal(dialogCalls[0].defaultPath, foreign);
+    assert.deepEqual(dialogCalls[0].filters, [{ name: "SQL", extensions: ["sql"] }]);
+
+    // The file picked in the dialog is approved from then on.
+    const again = await bridge.saveTextFile({ path: picked, content: "select 4;" });
+    assert.deepEqual(again, { ok: true, path: picked });
+    assert.equal(dialogCalls.length, 1);
+    assert.equal(fs.readFileSync(picked, "utf8"), "select 4;");
+  } finally {
+    Module._load = originalLoad;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("mysql: single SELECT rows are returned as a grid", () => {
   const fields = [{ name: "ok", type: 8 }];
   const result = shapeMysqlResult([{ ok: 1 }], fields, 100, Date.now());

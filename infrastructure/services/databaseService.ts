@@ -218,6 +218,34 @@ export async function readSqlFile(
   return { ok: true, text: response.text };
 }
 
+/**
+ * Writes a SQL script to disk. With `path` the file is overwritten in place
+ * when the user picked it in a dialog during this run; otherwise the native
+ * save dialog opens (pre-filled with `path` or `defaultName`). Never throws.
+ */
+export async function saveSqlFile(options: {
+  content: string;
+  path?: string;
+  defaultName?: string;
+}): Promise<{ ok: true; path?: string; canceled?: boolean } | { ok: false; error: string }> {
+  try {
+    const response = await bridge()?.dbSaveTextFile?.({
+      content: options.content,
+      ...(options.path ? { path: options.path } : {}),
+      ...(options.defaultName ? { defaultName: options.defaultName } : {}),
+      filters: [
+        { name: 'SQL', extensions: ['sql'] },
+        { name: 'Text', extensions: ['txt'] },
+      ],
+    });
+    if (!response) return { ok: false, error: 'No response from database bridge' };
+    if (response.ok !== true) return { ok: false, error: response.error ?? 'write-failed' };
+    return { ok: true, path: response.path, canceled: response.canceled };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** Saves exported config/SQL through the native save dialog. */
 export async function saveDatabaseTextFile(
   defaultName: string,

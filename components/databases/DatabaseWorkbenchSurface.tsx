@@ -30,6 +30,7 @@ import {
   Eye,
   CheckCircle2,
   FileCode2,
+  Save,
   Wand2,
   X,
 } from 'lucide-react';
@@ -67,6 +68,7 @@ import { statementAtLine } from '../../domain/database/sqlStatements';
 import {
   columnsToTsv,
   findResultMatches,
+  stepResultMatchCursor,
   sortResultRows,
   type ResultSort,
 } from '../../domain/database/resultGrid';
@@ -78,7 +80,7 @@ import {
   DATABASE_ENCODINGS,
   currentDatabaseEncoding,
 } from '../../domain/database/encoding';
-import { readSqlFile, saveDatabaseBinaryFile } from '@/infrastructure/services/databaseService.ts';
+import { readSqlFile, saveDatabaseBinaryFile, saveSqlFile } from '@/infrastructure/services/databaseService.ts';
 import { netcattyBridge } from '@/infrastructure/services/netcattyBridge.ts';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
@@ -315,9 +317,32 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       return;
     }
     workbench.updateSql(tab.id, loaded.text);
+    workbench.bindSqlFile(tab.id, filePath, loaded.text);
     sqlHistory.record(tab.connectionId, loaded.text);
     toast.success(t('databases.workbench.openSqlFileLoaded'));
   }, [tab, sqlHistory, t, workbench]);
+
+  // Save writes back to the bound file; the first save (and "save as") asks
+  // where to put it. The main process only overwrites files picked in a dialog.
+  const saveSqlToFile = useCallback(
+    async (saveAs = false) => {
+      const content = tab.sql;
+      const saved = await saveSqlFile({
+        content,
+        ...(tab.filePath && !saveAs ? { path: tab.filePath } : {}),
+        defaultName: tab.filePath ? sqlFileName(tab.filePath) : `${sanitizeSqlFileName(tab.title)}.sql`,
+      });
+      if (!saved.ok) {
+        toast.error(t('databases.workbench.saveSqlFileFailed', { error: (saved as { error?: string }).error ?? 'write-failed' }));
+        return;
+      }
+      if (saved.canceled || !saved.path) return;
+      workbench.bindSqlFile(tab.id, saved.path, content);
+      toast.success(t('databases.workbench.saveSqlFileSaved', { name: sqlFileName(saved.path) }));
+    },
+    [t, tab.filePath, tab.id, tab.sql, tab.title, workbench],
+  );
+  const sqlFileDirty = Boolean(tab.filePath) && tab.fileSavedSql !== tab.sql;
 
   const saveCurrentQuery = useCallback(() => {
     if (!onUpdateConnections) return;
@@ -405,11 +430,6 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     () => orderedRows.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize),
     [orderedRows, pageIndex, pageSize],
   );
-  const matches = useMemo(
-    () => findResultMatches(allRows, selectedColumns, searchQuery),
-    [allRows, selectedColumns, searchQuery],
-  );
-  const activeMatch = matches.length > 0 ? matches[Math.min(matchCursor, matches.length - 1)] : null;
   // Display position of each source row, so match jumps land on the right page
   // even while a sort reorders the grid.
   const positionBySource = useMemo(() => {
@@ -417,6 +437,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     orderedSourceIndexes.forEach((sourceIndex, position) => positions.set(sourceIndex, position));
     return positions;
   }, [orderedSourceIndexes]);
+  // Matches in the order they appear on screen, so previous / next walk the
+  // grid top to bottom whatever the sort is.
+  const matches = useMemo(() => {
+    const found = findResultMatches(allRows, selectedColumns, searchQuery);
+    const position = (rowIndex: number) => positionBySource.get(rowIndex) ?? rowIndex;
+    return found.sort(
+      (left, right) => position(left.rowIndex) - position(right.rowIndex) || left.columnIndex - right.columnIndex,
+    );
+  }, [allRows, positionBySource, selectedColumns, searchQuery]);
+  const matchPositions = useMemo(
+    () => matches.map((match) => positionBySource.get(match.rowIndex) ?? match.rowIndex),
+    [matches, positionBySource],
+  );
+  const activeMatch = matches.length > 0 ? matches[Math.min(matchCursor, matches.length - 1)] : null;
+  // Bumped by every previous / next click: revealing must happen even when the
+  // cursor value does not change (single match, or paging back to it).
+  const [revealToken, setRevealToken] = useState(0);
 
   useEffect(() => {
     setPage(0);
@@ -441,7 +478,7 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     setHighlight({ sourceIndex: activeMatch.rowIndex, columnIndex: activeMatch.columnIndex });
     const position = positionBySource.get(activeMatch.rowIndex) ?? activeMatch.rowIndex;
     setPage(Math.floor(position / pageSize));
-  }, [activeMatch, pageSize, positionBySource]);
+  }, [activeMatch, pageSize, positionBySource, revealToken]);
 
   const toggleSort = useCallback((columnIndex: number) => {
     setSort((current) => {
@@ -502,9 +539,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
   const goToMatch = useCallback(
     (delta: number) => {
       if (matches.length === 0) return;
-      setMatchCursor((current) => (current + delta + matches.length) % matches.length);
+      const direction = delta < 0 ? -1 : 1;
+      const current = Math.min(matchCursor, matches.length - 1);
+      const start = pageIndex * pageSize;
+      const activePosition = matchPositions[current] ?? -1;
+      // Paged away from the active match by hand: continue from this page.
+      const awayFromActive = activePosition < start || activePosition >= start + pageSize;
+      setMatchCursor(
+        stepResultMatchCursor(
+          matchPositions,
+          current,
+          direction,
+          awayFromActive ? { start, end: start + pageSize } : null,
+        ),
+      );
+      setRevealToken((token) => token + 1);
     },
-    [matches.length],
+    [matchCursor, matchPositions, matches.length, pageIndex, pageSize],
   );
 
   const [aiOpen, setAiOpen] = useState(false);
@@ -682,6 +733,42 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="relative h-7 w-7 p-0"
+            data-testid="db-save-sql-file"
+            aria-label={t('databases.workbench.saveSqlFile')}
+            onClick={(event) => void saveSqlToFile(event.shiftKey)}
+          >
+            <Save className="h-3.5 w-3.5" />
+            {sqlFileDirty ? (
+              <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+            ) : null}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{t('databases.workbench.saveSqlFile')}</TooltipContent>
+      </Tooltip>
+      {tab.filePath ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="flex h-7 max-w-[180px] items-center gap-1 rounded px-1.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => void saveSqlToFile(true)}
+            >
+              <span className="truncate font-mono">{sqlFileName(tab.filePath)}</span>
+              {sqlFileDirty ? <span className="shrink-0 text-amber-500" aria-label={t('databases.workbench.sqlFileUnsaved')}>●</span> : null}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <span className="block max-w-[420px] break-all font-mono text-[11px]">{tab.filePath}</span>
+            <span className="block text-[11px] opacity-80">{t('databases.workbench.saveSqlFileAs')}</span>
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      <Tooltip>
+        <TooltipTrigger asChild>
           <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={formatSql}>
             <Wand2 className="h-3.5 w-3.5" />
           </Button>
@@ -825,6 +912,14 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     <div
       className="flex min-h-0 min-w-0 flex-col"
       style={{ flexBasis: `${editorRatio * 100}%`, flexGrow: 0, flexShrink: 0 }}
+      // Capture phase: the editor swallows key events it does not know.
+      onKeyDownCapture={(event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          void saveSqlToFile(event.shiftKey);
+        }
+      }}
     >
       <ScriptCodeEditor
         value={tab.sql}
@@ -1758,6 +1853,20 @@ interface ResultGridProps {
   onClearSelection?: () => void;
   /** 1-based number of the first row on this page (keeps numbers stable across pages). */
   rowNumberStart?: number;
+}
+
+/** Last path segment, for both / and \\ separators. */
+function sqlFileName(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() || filePath;
+}
+
+/** A tab title that is safe to offer as a file name on every platform. */
+function sanitizeSqlFileName(title: string): string {
+  const cleaned = Array.from(title, (char) => (char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char) ? '-' : char))
+    .join('')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[\s.-]+|[\s.-]+$/g, '');
+  return cleaned.slice(0, 80) || 'query';
 }
 
 const ACTION_COLUMN_WIDTH = 32;

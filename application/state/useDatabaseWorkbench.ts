@@ -96,6 +96,10 @@ export interface DatabaseTab {
   runStartedAt?: number;
   /** BEGIN / COMMIT / ROLLBACK in flight. */
   transactionBusy?: boolean;
+  /** Local .sql file this tab was opened from or last saved to. */
+  filePath?: string;
+  /** Editor text as it is on disk; differs from `sql` while there are unsaved edits. */
+  fileSavedSql?: string;
 }
 
 /** One statement's outcome within a multi-statement run. */
@@ -120,6 +124,8 @@ export interface UseDatabaseWorkbenchResult {
   closeTab: (tabId: string) => void;
   setActiveTabId: (tabId: string | null) => void;
   updateSql: (tabId: string, sql: string) => void;
+  /** Remember which file the tab's SQL lives in (after open / save). */
+  bindSqlFile: (tabId: string, filePath: string, savedSql: string) => void;
   runQuery: (tabId: string, sqlOverride?: string, options?: { maxRows?: number }) => Promise<void>;
   setMaxRows: (tabId: string, maxRows: number) => void;
   beginTransaction: (tabId: string) => Promise<void>;
@@ -476,7 +482,10 @@ export function useDatabaseWorkbench(
   );
 
   const openTab = useCallback(
-    async (connection: DatabaseConnection, options?: { forceNew?: boolean }) => {
+    async (
+      connection: DatabaseConnection,
+      options?: { forceNew?: boolean; sql?: string; maxRows?: number },
+    ) => {
       const existing = options?.forceNew
         ? undefined
         : tabsRef.current.find((tab) => tab.connectionId === connection.id);
@@ -492,11 +501,11 @@ export function useDatabaseWorkbench(
           connectionId: connection.id,
           title: connection.label,
           kind: connection.kind,
-          sql: '',
+          sql: options?.sql ?? '',
           status: 'connecting',
           connected: false,
           running: false,
-          maxRows: 1000,
+          maxRows: options?.maxRows ?? 1000,
         },
       ]);
       setActiveTabIdState(id);
@@ -537,6 +546,13 @@ export function useDatabaseWorkbench(
   const updateSql = useCallback(
     (tabId: string, sql: string) => {
       patchTab(tabId, { sql });
+    },
+    [patchTab],
+  );
+
+  const bindSqlFile = useCallback(
+    (tabId: string, filePath: string, savedSql: string) => {
+      patchTab(tabId, { filePath, fileSavedSql: savedSql });
     },
     [patchTab],
   );
@@ -1060,6 +1076,9 @@ export function useDatabaseWorkbench(
           connected: false,
           running: false,
           maxRows: 1000,
+          // The file binding survives a restart; without the on-disk text the
+          // tab simply shows as unsaved until the next save.
+          ...(typeof entry.filePath === 'string' && entry.filePath ? { filePath: entry.filePath } : {}),
         };
         return tab;
       })
@@ -1092,6 +1111,7 @@ export function useDatabaseWorkbench(
         connectionId: tab.connectionId,
         title: tab.title,
         sql: tab.sql,
+        ...(tab.filePath ? { filePath: tab.filePath } : {}),
       })),
       activeTabId,
     );
@@ -1112,6 +1132,19 @@ export function useDatabaseWorkbench(
       });
     } else if (tabRequest.type === 'close') {
       closeTab(tabRequest.tabId);
+    } else if (tabRequest.type === 'duplicate') {
+      const source = tabsRef.current.find((entry) => entry.id === tabRequest.tabId);
+      const connection = source
+        ? connectionsRef.current.find((item) => item.id === source.connectionId)
+        : undefined;
+      if (!source || !connection) return;
+      // Same connection (shared session), same SQL draft and row cap; results
+      // and transaction state stay with the original tab.
+      void openTab(connection, { forceNew: true, sql: source.sql, maxRows: source.maxRows }).then((id) => {
+        setActiveTabIdState(id);
+        databaseTabStore.activate(id);
+        databaseTabStore.markActive(id);
+      });
     }
   }, [tabRequest, openTab, closeTab]);
 
@@ -1141,6 +1174,7 @@ export function useDatabaseWorkbench(
     closeTab,
     setActiveTabId,
     updateSql,
+    bindSqlFile,
     runQuery,
     setMaxRows,
     refreshTables,

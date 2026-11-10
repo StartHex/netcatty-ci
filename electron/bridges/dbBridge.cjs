@@ -1790,6 +1790,40 @@ function driverClassesFromJar(payload) {
 }
 
 /** Reads a .sql script picked by the renderer; bounded so a huge file can't block. */
+/**
+ * Files the user picked in a native dialog during this run. Only these may be
+ * overwritten without asking again ("Save" after "Open" / "Save as"); any
+ * other path sent by the renderer goes back through the save dialog.
+ */
+const approvedTextFilePaths = new Set();
+const MAX_APPROVED_TEXT_FILE_PATHS = 200;
+
+function approveTextFilePath(filePath) {
+  if (typeof filePath !== "string" || !filePath) return;
+  const resolved = path.resolve(filePath);
+  approvedTextFilePaths.delete(resolved);
+  approvedTextFilePaths.add(resolved);
+  if (approvedTextFilePaths.size > MAX_APPROVED_TEXT_FILE_PATHS) {
+    approvedTextFilePaths.delete(approvedTextFilePaths.values().next().value);
+  }
+}
+
+function isApprovedTextFilePath(filePath) {
+  return typeof filePath === "string" && filePath !== "" && approvedTextFilePaths.has(path.resolve(filePath));
+}
+
+function sanitizeDialogFilters(filters) {
+  if (!Array.isArray(filters)) return undefined;
+  const clean = filters
+    .filter((entry) => entry && typeof entry.name === "string" && Array.isArray(entry.extensions))
+    .map((entry) => ({
+      name: entry.name.slice(0, 60),
+      extensions: entry.extensions.filter((ext) => typeof ext === "string" && /^[\w*]{1,12}$/.test(ext)),
+    }))
+    .filter((entry) => entry.extensions.length > 0);
+  return clean.length > 0 ? clean : undefined;
+}
+
 async function readSqlFile(rawPath) {
   const filePath = typeof rawPath === "string" ? rawPath : rawPath?.path;
   if (!filePath) return { ok: false, error: "missing-path" };
@@ -1798,6 +1832,7 @@ async function readSqlFile(rawPath) {
     if (!stat.isFile()) return { ok: false, error: "not-a-file" };
     if (stat.size > MAX_SQL_FILE_BYTES) return { ok: false, error: "too-large" };
     const text = await fs.promises.readFile(filePath, "utf8");
+    approveTextFilePath(filePath);
     return { ok: true, text, path: filePath };
   } catch (error) {
     return { ok: false, error: error?.code || error?.message || "read-failed" };
@@ -1807,20 +1842,34 @@ async function readSqlFile(rawPath) {
 const MAX_TEXT_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_BINARY_FILE_BYTES = 64 * 1024 * 1024;
 
-/** Saves a text file the renderer produced (exports, DDL dumps). */
+/**
+ * Saves a text file the renderer produced (SQL scripts, exports, DDL dumps).
+ *
+ * `path` overwrites that file directly, but only when the user already picked
+ * it in a dialog during this run; otherwise (and for "save as") the native
+ * save dialog opens, pre-filled with `path` or `defaultName`.
+ */
 async function saveTextFile(payload) {
-  const { defaultName, content } = payload || {};
+  const { defaultName, content, filters } = payload || {};
+  const targetPath = typeof payload?.path === "string" ? payload.path : "";
   if (typeof content !== "string") return { ok: false, error: "nothing-to-save" };
   if (Buffer.byteLength(content, "utf8") > MAX_TEXT_FILE_BYTES) {
     return { ok: false, error: "too-large" };
   }
   try {
+    if (targetPath && isApprovedTextFilePath(targetPath)) {
+      const resolved = path.resolve(targetPath);
+      await fs.promises.writeFile(resolved, content, "utf8");
+      return { ok: true, path: resolved };
+    }
     const { dialog } = require("electron");
     const result = await dialog.showSaveDialog({
-      defaultPath: typeof defaultName === "string" ? defaultName : undefined,
+      defaultPath: targetPath || (typeof defaultName === "string" ? defaultName : undefined),
+      filters: sanitizeDialogFilters(filters),
     });
     if (result.canceled || !result.filePath) return { ok: true, canceled: true };
     await fs.promises.writeFile(result.filePath, content, "utf8");
+    approveTextFilePath(result.filePath);
     return { ok: true, path: result.filePath };
   } catch (error) {
     return { ok: false, error: error?.message || "write-failed" };
@@ -1874,6 +1923,7 @@ module.exports = {
   registerDbHandlers,
   handlers,
   readSqlFile,
+  saveTextFile,
   saveBinaryFile,
   __test: {
     clampMaxRows,

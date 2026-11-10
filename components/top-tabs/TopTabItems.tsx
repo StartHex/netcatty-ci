@@ -1,8 +1,8 @@
 import { Copy, Database, FileCode, FileText, LayoutGrid, Minus, Server, Square, SquareArrowOutUpRight, Terminal, TerminalSquare, Usb, Waypoints, X } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { activeTabStore, useActiveTabId, useIsTabActive } from '../../application/state/activeTabStore';
-import { toDatabaseTabId, type DatabaseTabSummary } from '../../application/state/databaseTabStore';
-import { toCurlTabId, type CurlTabSummary } from '../../application/state/curlTabStore';
+import { databaseTabStore, toDatabaseTabId, type DatabaseTabSummary } from '../../application/state/databaseTabStore';
+import { curlTabStore, toCurlTabId, type CurlTabSummary } from '../../application/state/curlTabStore';
 import {
   useAnySessionActivity,
   useSessionActivity,
@@ -637,6 +637,9 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
     event?.stopPropagation();
     onClose(tab.id);
   }, [onClose, tab.id]);
+  const duplicate = useCallback(() => {
+    databaseTabStore.requestDuplicate(tab.id);
+  }, [tab.id]);
   const busy = tab.status === 'connecting';
   const dotClass =
     tab.status === 'ready'
@@ -653,6 +656,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
       data-state={isActive ? 'active' : 'inactive'}
       data-active={topTabActiveValue(isActive)}
       onClick={activate}
+      onDoubleClick={duplicate}
       onMouseDown={handleTabDragThresholdMouseDown}
       onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
       onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
@@ -695,6 +699,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
       <button
         onMouseDown={handleTabCloseButtonMouseDown}
         onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
         className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
         aria-label={t('tabs.closeDatabaseAria', { title: tab.title })}
       >
@@ -711,6 +716,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
         <TooltipContent>{tab.title}</TooltipContent>
       </Tooltip>
       <ContextMenuContent>
+        <ContextMenuItem onClick={duplicate}>{t('tabs.copyTab')}</ContextMenuItem>
         <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
         {renderBulkCloseItems(tabId)}
       </ContextMenuContent>
@@ -765,6 +771,9 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
     event?.stopPropagation();
     onClose(tab.id);
   }, [onClose, tab.id]);
+  const duplicate = useCallback(() => {
+    curlTabStore.requestDuplicate(tab.id);
+  }, [tab.id]);
   const busy = tab.status === 'sending';
   const dotClass =
     tab.status === 'done'
@@ -781,6 +790,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
       data-state={isActive ? 'active' : 'inactive'}
       data-active={topTabActiveValue(isActive)}
       onClick={activate}
+      onDoubleClick={duplicate}
       onMouseDown={handleTabDragThresholdMouseDown}
       onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
       onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
@@ -824,6 +834,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
       <button
         onMouseDown={handleTabCloseButtonMouseDown}
         onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
         className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
         aria-label={t('tabs.closeCurlAria', { title: tab.title })}
       >
@@ -840,6 +851,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
         <TooltipContent>{tab.title}</TooltipContent>
       </Tooltip>
       <ContextMenuContent>
+        <ContextMenuItem onClick={duplicate}>{t('tabs.copyTab')}</ContextMenuItem>
         <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
         {renderBulkCloseItems(tabId)}
       </ContextMenuContent>

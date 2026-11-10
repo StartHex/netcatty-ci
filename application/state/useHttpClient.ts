@@ -187,6 +187,23 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
     curlTabStore.activate(tab.id);
   }, [createTab, setActiveTabId]);
 
+  // The copy is a detached, unsaved draft: two tabs bound to one saved request
+  // would overwrite each other on save.
+  const duplicateTab = useCallback((tabId: string) => {
+    const source = tabsRef.current.find((item) => item.id === tabId);
+    if (!source) return;
+    const now = Date.now();
+    const draft: CurlRequest = { ...cloneRequest(source.draft), id: makeId('req'), createdAt: now, updatedAt: now };
+    delete draft.lastUsedAt;
+    const tab = createTab(draft);
+    setTabs((current) => {
+      const index = current.findIndex((item) => item.id === tabId);
+      return index < 0 ? [...current, tab] : [...current.slice(0, index + 1), tab, ...current.slice(index + 1)];
+    });
+    setActiveTabId(tab.id);
+    curlTabStore.activate(tab.id);
+  }, [createTab, setActiveTabId]);
+
   const closeTab = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((item) => item.id === tabId);
     const inFlight = inFlightRef.current.get(tabId) ?? tab?.inFlightId;
@@ -491,9 +508,11 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
       else openBlank();
     } else if (request.type === 'close') {
       closeTab(request.tabId);
+    } else if (request.type === 'duplicate') {
+      duplicateTab(request.tabId);
     }
     curlTabStore.clearRequest(request.nonce);
-  }, [request, openSaved, openBlank, closeTab]);
+  }, [request, openSaved, openBlank, closeTab, duplicateTab]);
 
   const savedRequests = useMemo(() => sortCurlRequests(requests ?? []), [requests]);
 
