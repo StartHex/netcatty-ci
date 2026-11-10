@@ -2,7 +2,15 @@ import type { Messages } from '../types';
 
 export const zhCNVaultMessages: Messages = {
   // Notes
-  'notes.search.placeholder': '搜索笔记、主机、标签...',
+  'notes.search.placeholder': '搜索标题、正文、标签、主机...',
+  'notes.search.summary': '{notes} 篇笔记 · {matches} 处匹配',
+  'notes.search.moreMatches': '还有 {count} 处匹配',
+  'notes.search.matchCount': '本笔记中有 {count} 处匹配',
+  'notes.search.previousMatch': '上一处匹配（Shift+回车）',
+  'notes.search.nextMatch': '下一处匹配（回车）',
+  'notes.search.close': '关闭搜索',
+  'notes.search.noMatchesInNote': '无匹配',
+  'notes.search.keyboardHint': '回车：下一处 · Shift+回车：上一处 · Esc：清空',
   'notes.action.newNote': '新建笔记',
   'notes.action.newGroup': '新建文件夹',
   'notes.action.importMarkdown': '导入 Markdown',

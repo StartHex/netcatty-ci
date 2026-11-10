@@ -16,7 +16,18 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import React, { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  lazy,
+  memo,
+  Suspense,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useI18n } from "../../application/i18n/I18nProvider";
 import { useApplicationBackend } from "../../application/state/useApplicationBackend";
 import { useStoredNumber } from "../../application/state/useStoredNumber";
@@ -34,7 +45,6 @@ import {
   getNoteGroupParentPath,
   isNoteGroupInside,
   joinNoteGroupPath,
-  matchesVaultNoteSearch,
   importMarkdownPayloadsToVaultNotes,
   normalizeNoteGroups,
   normalizeVaultNotes,
@@ -46,6 +56,12 @@ import {
   type NoteHeadingItem,
   type VaultNotesExportScope,
 } from "../../domain/notes";
+import {
+  createNoteSearchIndex,
+  noteSearchTermsKey,
+  noteSearchTextMatchesAll,
+  type NoteSearchResult,
+} from "../../domain/notes/noteSearch";
 import { getNextVaultOrder, reorderVaultItems, reorderVaultStrings, sortByVaultOrder } from "../../domain/vaultOrder";
 import {
   STORAGE_KEY_VAULT_NOTES_EDITOR_MODE,
@@ -92,9 +108,16 @@ import type {
   ActiveTextFormats,
   InlineMarkdownEditorHandle,
   NoteEditorMode,
+  NoteSearchHighlightRequest,
 } from "./noteEditorTypes";
 import { EMPTY_ACTIVE_FORMATS } from "./noteEditorTypes";
 import { NoteTitleInput } from "./NoteTitleInput";
+import {
+  formatNoteSearchCount,
+  NoteSearchHighlightedText,
+  NoteSearchNavigator,
+  NoteSearchSnippetList,
+} from "./NoteSearchResults";
 
 const InlineMarkdownEditor = lazy(() =>
   import("./InlineMarkdownEditor.lazy").then((module) => ({ default: module.InlineMarkdownEditor })),
@@ -113,6 +136,15 @@ interface NoteFolderNode {
 }
 
 type NotesToolbarPanel = "search" | null;
+
+/** Which body occurrence the editor should emphasize; `token` re-reveals on every jump. */
+type NoteSearchFocus = { noteId: string; occurrence: number; token: number };
+
+const EMPTY_NOTE_SEARCH_RESULT: NoteSearchResult = { terms: [], hits: new Map(), totalMatches: 0 };
+
+/** IME confirmation (Chinese / Japanese input) also fires Enter; it must not navigate. */
+const isImeComposing = (event: React.KeyboardEvent): boolean =>
+  event.nativeEvent.isComposing || event.keyCode === 229;
 
 const toolbarIconButtonClass = "netcatty-tab h-6 w-6 shrink-0 rounded-md p-0 hover:bg-transparent";
 const menuItemClass = "flex h-8 w-full items-center rounded-md px-3 text-left text-sm hover:bg-secondary";
@@ -439,6 +471,10 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     ? openNoteId
     : null;
   const [query, setQuery] = useState("");
+  // The tree filters on the deferred value so typing stays responsive on large vaults.
+  const deferredQuery = useDeferredValue(query);
+  const [searchFocus, setSearchFocus] = useState<NoteSearchFocus | null>(null);
+  const [editorSearchCount, setEditorSearchCount] = useState<{ noteId: string | null; count: number } | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => initialOpenNoteId ?? (isSidebarMode ? null : notes[0]?.id ?? null));
   const [noteEditorMode, setNoteEditorMode] = useStoredString<NoteEditorMode>(
@@ -515,6 +551,20 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   );
   const sortedNotes = useMemo(() => sortNoteItems(normalizeVaultNotes(notes)), [notes]);
   sortedNotesRef.current = sortedNotes;
+
+  // The index lower-cases every note body, so it is only built while searching.
+  const hasDeferredQuery = deferredQuery.trim().length > 0;
+  const noteSearchIndex = useMemo(
+    () => (hasDeferredQuery ? createNoteSearchIndex(sortedNotes, hosts) : null),
+    [hasDeferredQuery, hosts, sortedNotes],
+  );
+  const searchResult = useMemo(
+    () => (noteSearchIndex ? noteSearchIndex(deferredQuery) : EMPTY_NOTE_SEARCH_RESULT),
+    [deferredQuery, noteSearchIndex],
+  );
+  const searchTerms = searchResult.terms;
+  const searchTermsKey = noteSearchTermsKey(searchTerms);
+  const searchActive = searchTerms.length > 0;
 
   const commitNotes = useCallback((nextNotes: VaultNote[]) => {
     const cleaned = normalizeVaultNotes(nextNotes);
@@ -680,11 +730,74 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     };
   }, []);
 
-  const queryText = query.trim();
-  const queryLower = queryText.toLowerCase();
-  const noteMatches = (note: VaultNote) => matchesVaultNoteSearch(note, queryText, hosts);
+  const noteMatches = (note: VaultNote) => !searchActive || searchResult.hits.has(note.id);
   const groupMatches = (node: NoteFolderNode) =>
-    !queryLower || node.name.toLowerCase().includes(queryLower) || node.path.toLowerCase().includes(queryLower);
+    !searchActive || noteSearchTextMatchesAll(node.path, searchTerms);
+
+  /** Notes with search hits, in the same order the tree paints them. */
+  const orderedSearchNotes = useMemo(() => {
+    if (!searchActive) return [];
+    const ordered: VaultNote[] = [];
+    const visit = (node: NoteFolderNode) => {
+      node.children.forEach(visit);
+      node.notes.forEach((note) => {
+        if (searchResult.hits.has(note.id)) ordered.push(note);
+      });
+    };
+    noteTree.children.forEach(visit);
+    noteTree.rootNotes.forEach((note) => {
+      if (searchResult.hits.has(note.id)) ordered.push(note);
+    });
+    return ordered;
+  }, [noteTree, searchActive, searchResult]);
+
+  const openEditorNote = isSidebarMode ? overlayNoteView : selectedNoteView;
+  const openEditorNoteId = openEditorNote?.id ?? null;
+  const openEditorNoteIdRef = useRef<string | null>(openEditorNoteId);
+  openEditorNoteIdRef.current = openEditorNoteId;
+
+  // A new query invalidates the focused occurrence of the previous one.
+  useEffect(() => {
+    setSearchFocus(null);
+    setEditorSearchCount(null);
+  }, [searchTermsKey]);
+
+  const handleEditorSearchMatchCount = useCallback((count: number) => {
+    const noteId = openEditorNoteIdRef.current;
+    setEditorSearchCount((current) => (
+      current && current.noteId === noteId && current.count === count ? current : { noteId, count }
+    ));
+  }, []);
+
+  /** Matches the open editor actually renders (falls back to the raw-markdown count). */
+  const editorSearchTotal = !openEditorNoteId
+    ? 0
+    : editorSearchCount && editorSearchCount.noteId === openEditorNoteId
+      ? editorSearchCount.count
+      : searchResult.hits.get(openEditorNoteId)?.bodyMatchCount ?? 0;
+  const editorSearchActiveIndex = searchFocus && searchFocus.noteId === openEditorNoteId
+    ? searchFocus.occurrence
+    : null;
+
+  // The raw markdown can hold matches the rich view hides (link targets, escapes):
+  // keep the focused occurrence inside what the editor really shows.
+  useEffect(() => {
+    if (!searchFocus || !editorSearchCount || editorSearchCount.noteId !== searchFocus.noteId) return;
+    const last = editorSearchCount.count - 1;
+    if (last >= 0 && searchFocus.occurrence > last) {
+      setSearchFocus({ ...searchFocus, occurrence: last });
+    }
+  }, [editorSearchCount, searchFocus]);
+
+  const editorSearchHighlight = useMemo<NoteSearchHighlightRequest | undefined>(() => {
+    if (!searchTermsKey) return undefined;
+    const focused = searchFocus && searchFocus.noteId === openEditorNoteId ? searchFocus : null;
+    return {
+      terms: searchTermsKey.split("\u0000"),
+      activeOccurrence: focused ? focused.occurrence : null,
+      revealToken: focused ? focused.token : 0,
+    };
+  }, [openEditorNoteId, searchFocus, searchTermsKey]);
 
   useEffect(() => {
     const nextSelection = getValidatedNoteSelectionState(sortedNotes, selectedNoteId, selectedGroup, isSidebarMode);
@@ -756,6 +869,56 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
 
   const expandAllGroups = () => setExpandedGroups(new Set(allGroupPaths));
   const collapseAllGroups = () => setExpandedGroups(new Set());
+
+  /** Opens `note` and asks its editor to emphasize + reveal one body occurrence. */
+  const openNoteForSearch = (note: VaultNote, occurrence: number) => {
+    const nextSelection = getNoteSelectionState(note, isSidebarMode);
+    setSelectedNoteId(nextSelection.selectedNoteId);
+    setSelectedGroup(nextSelection.selectedGroup);
+    setOverlayNoteId(nextSelection.overlayNoteId);
+    if (note.group) expandPath(note.group);
+    setSearchFocus((current) => ({
+      noteId: note.id,
+      occurrence: Math.max(0, occurrence),
+      token: (current?.token ?? 0) + 1,
+    }));
+  };
+
+  /** Steps through every match of every result note, wrapping at both ends. */
+  const goToSearchMatch = (delta: 1 | -1) => {
+    if (orderedSearchNotes.length === 0) return;
+    const countFor = (note: VaultNote) => (
+      editorSearchCount && editorSearchCount.noteId === note.id && openEditorNoteId === note.id
+        ? editorSearchCount.count
+        : searchResult.hits.get(note.id)?.bodyMatchCount ?? 0
+    );
+    const lastOccurrenceOf = (note: VaultNote) => Math.max(0, countFor(note) - 1);
+    const currentIndex = openEditorNoteId
+      ? orderedSearchNotes.findIndex((note) => note.id === openEditorNoteId)
+      : -1;
+    if (currentIndex === -1) {
+      const target = delta > 0 ? orderedSearchNotes[0] : orderedSearchNotes[orderedSearchNotes.length - 1];
+      openNoteForSearch(target, delta > 0 ? 0 : lastOccurrenceOf(target));
+      return;
+    }
+    const current = orderedSearchNotes[currentIndex];
+    const count = countFor(current);
+    const focused = searchFocus && searchFocus.noteId === current.id ? searchFocus.occurrence : null;
+    const next = focused === null ? (delta > 0 ? 0 : count - 1) : focused + delta;
+    if (count > 0 && next >= 0 && next < count) {
+      openNoteForSearch(current, next);
+      return;
+    }
+    const target = orderedSearchNotes[
+      (currentIndex + delta + orderedSearchNotes.length) % orderedSearchNotes.length
+    ];
+    openNoteForSearch(target, delta > 0 ? 0 : lastOccurrenceOf(target));
+  };
+
+  const clearNoteSearch = () => {
+    setQuery("");
+    setSearchFocus(null);
+  };
 
   /** Flush pending draft, then mutate from the post-flush ref snapshot. */
   const commitNotesAfterFlush = useCallback((mutator: (notes: VaultNote[]) => VaultNote[]) => {
@@ -1359,13 +1522,34 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
 
   const renderNoteRow = (note: VaultNote, depth: number) => {
     if (!noteMatches(note)) return null;
+    const searchHit = searchActive ? searchResult.hits.get(note.id) : undefined;
+    const showSearchTitle = Boolean(searchHit) && editingNoteId !== note.id;
     return (
-      <ContextMenu key={note.id}>
+      <React.Fragment key={note.id}>
+      <ContextMenu>
         <ContextMenuTrigger asChild>
             <VaultTreeItemRow
             label={noteDisplayTitle(note.title)}
             depth={depth}
             selected={selectedNoteId === note.id}
+            content={showSearchTitle && searchHit ? (
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                <div className="min-w-0 flex-1 truncate leading-5 translate-y-px" title={noteDisplayTitle(note.title)}>
+                  <NoteSearchHighlightedText
+                    text={noteDisplayTitle(note.title)}
+                    ranges={note.title ? searchHit.titleRanges : []}
+                  />
+                </div>
+                {searchHit.bodyMatchCount > 0 ? (
+                  <span
+                    className="netcatty-search-count shrink-0 rounded-full bg-amber-400/20 px-1.5 text-[10px] font-medium leading-4 text-amber-700 dark:text-amber-300"
+                    title={t("notes.search.matchCount", { count: searchHit.bodyMatchCount })}
+                  >
+                    {formatNoteSearchCount(searchHit.bodyMatchCount, searchHit.bodyMatchCountCapped)}
+                  </span>
+                ) : null}
+              </div>
+            ) : undefined}
             editing={editingNoteId === note.id}
             editingInitialName={note.title}
             onRenameCommit={(name) => {
@@ -1409,6 +1593,11 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
             }}
             onDragEnd={resetTreeDragState}
             onClick={() => {
+              // A search result opens straight at its first body match.
+              if (searchHit && searchHit.bodyMatchCount > 0) {
+                openNoteForSearch(note, 0);
+                return;
+              }
               const nextSelection = getNoteSelectionState(note, isSidebarMode);
               setSelectedNoteId(nextSelection.selectedNoteId);
               setSelectedGroup(nextSelection.selectedGroup);
@@ -1425,6 +1614,16 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
           {renderNoteActions(note, "context")}
         </ContextMenuContent>
       </ContextMenu>
+      {searchHit ? (
+        <NoteSearchSnippetList
+          hit={searchHit}
+          depth={depth}
+          selected={selectedNoteId === note.id}
+          moreLabel={(count) => t("notes.search.moreMatches", { count })}
+          onSelectOccurrence={(occurrence) => openNoteForSearch(note, occurrence)}
+        />
+      ) : null}
+      </React.Fragment>
     );
   };
 
@@ -1434,11 +1633,11 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     const visibleChildren = node.children
       .map((child) => renderFolderRow(child, depth + 1))
       .filter(Boolean);
-    if (queryText && !folderMatchesQuery && visibleNotes.length === 0 && visibleChildren.length === 0) {
+    if (searchActive && !folderMatchesQuery && visibleNotes.length === 0 && visibleChildren.length === 0) {
       return null;
     }
 
-    const expanded = queryText ? true : expandedGroups.has(node.path);
+    const expanded = searchActive ? true : expandedGroups.has(node.path);
     const hasChildren = node.children.length > 0 || node.notes.length > 0;
     return (
       <React.Fragment key={node.path}>
@@ -1549,13 +1748,24 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     const treeIsEmpty = visibleRootNotes.length === 0 && visibleTree.length === 0;
     return (
       <>
+        {searchActive && !treeIsEmpty ? (
+          <div
+            className="nc-anim-fade-in flex h-5 items-center px-2 text-[11px] text-muted-foreground"
+            data-note-search-summary="true"
+          >
+            {t("notes.search.summary", {
+              notes: searchResult.hits.size,
+              matches: searchResult.totalMatches,
+            })}
+          </div>
+        ) : null}
         {renderCreateGroupRow(null, 0)}
         {visibleTree}
         {visibleRootNotes.map((note) => renderNoteRow(note, 0))}
         {treeIsEmpty && (
-          <div className="rounded-lg border border-dashed border-border/70 p-4 text-center text-sm text-muted-foreground">
+          <div className="nc-anim-fade-in rounded-lg border border-dashed border-border/70 p-4 text-center text-sm text-muted-foreground">
             <Search size={20} className="mx-auto mb-2 opacity-60" />
-            {query.trim() ? t("notes.search.noResults") : t("notes.empty.group")}
+            {searchActive ? t("notes.search.noResults") : t("notes.empty.group")}
           </div>
         )}
       </>
@@ -1631,6 +1841,25 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerUp);
   }, [persistTreeWidth, setTreeWidth]);
+
+  const searchNavigator = searchActive && openEditorNote ? (
+    <div className="pointer-events-none absolute right-4 top-2 z-20 flex justify-end">
+      <NoteSearchNavigator
+        activeIndex={editorSearchActiveIndex}
+        total={editorSearchTotal}
+        canNavigate={orderedSearchNotes.length > 0}
+        labels={{
+          previous: t("notes.search.previousMatch"),
+          next: t("notes.search.nextMatch"),
+          close: t("notes.search.close"),
+          noMatches: t("notes.search.noMatchesInNote"),
+        }}
+        onPrevious={() => goToSearchMatch(-1)}
+        onNext={() => goToSearchMatch(1)}
+        onClose={clearNoteSearch}
+      />
+    </div>
+  ) : null;
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
@@ -1780,7 +2009,20 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                     ref={searchInputRef}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (isImeComposing(event)) return;
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        goToSearchMatch(event.shiftKey ? -1 : 1);
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        if (query) clearNoteSearch();
+                        else setExpandedPanel(null);
+                      }
+                    }}
                     placeholder={t("notes.search.placeholder")}
+                    title={t("notes.search.keyboardHint")}
+                    aria-label={t("notes.search.placeholder")}
                     className="h-7 border-0 bg-transparent pl-6 pr-1 text-xs shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
                   />
                 </div>
@@ -1792,7 +2034,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                         size="icon"
                         className={toolbarIconButtonClass}
                         onClick={() => {
-                          setQuery("");
+                          clearNoteSearch();
                           searchInputRef.current?.focus();
                         }}
                       >
@@ -1828,7 +2070,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                 expandedGroups={expandedGroups}
                 editingNoteId={editingNoteId}
                 editingGroupPath={editingGroupPath}
-                query={query}
+                query={deferredQuery}
                 locale={locale}
                 hosts={hosts}
                 draggingNoteId={draggingNoteId}
@@ -2023,7 +2265,8 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                 onChangeNoteCodeFontSize={handleSetNoteCodeFontSize}
               />
 
-              <div className="flex flex-1 min-h-0 min-w-0">
+              <div className="relative flex flex-1 min-h-0 min-w-0">
+                {searchNavigator}
                 {noteEditorMode === "source" ? (
                   <div
                     className="flex-1 min-h-0 min-w-0 h-full"
@@ -2051,6 +2294,8 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                           noteFontSize={noteFontSize}
                           noteCodeFontSize={noteCodeFontSize}
                           onActiveFormatsChange={setActiveFormats}
+                          searchHighlight={editorSearchHighlight}
+                          onSearchMatchCountChange={handleEditorSearchMatchCount}
                         />
                       </Suspense>
                     </LazyLoadBoundary>
@@ -2083,6 +2328,8 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                             noteFontSize={noteFontSize}
                             noteCodeFontSize={noteCodeFontSize}
                             onActiveFormatsChange={setActiveFormats}
+                            searchHighlight={editorSearchHighlight}
+                            onSearchMatchCountChange={handleEditorSearchMatchCount}
                           />
                         </Suspense>
                       </LazyLoadBoundary>
@@ -2193,6 +2440,8 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
               onChangeNoteCodeFontSize={handleSetNoteCodeFontSize}
             />
 
+            <div className="relative flex min-h-0 flex-1 flex-col">
+            {searchNavigator}
             {noteEditorMode === "source" ? (
               <div
                 className="flex-1 min-h-0 min-w-0 h-full"
@@ -2220,6 +2469,8 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                       noteFontSize={noteFontSize}
                       noteCodeFontSize={noteCodeFontSize}
                       onActiveFormatsChange={setActiveFormats}
+                      searchHighlight={editorSearchHighlight}
+                      onSearchMatchCountChange={handleEditorSearchMatchCount}
                     />
                   </Suspense>
                 </LazyLoadBoundary>
@@ -2252,12 +2503,15 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
                         noteFontSize={noteFontSize}
                         noteCodeFontSize={noteCodeFontSize}
                         onActiveFormatsChange={setActiveFormats}
+                        searchHighlight={editorSearchHighlight}
+                        onSearchMatchCountChange={handleEditorSearchMatchCount}
                       />
                     </Suspense>
                   </LazyLoadBoundary>
                 </div>
               </ScrollArea>
             )}
+            </div>
           </div>
         </div>
       )}

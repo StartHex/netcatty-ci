@@ -69,7 +69,9 @@ import {
   type ActiveTextFormats,
   type InlineMarkdownEditorHandle,
   type NoteEditorMode,
+  type NoteSearchHighlightRequest,
 } from "./noteEditorTypes";
+import { useNoteSearchHighlight } from "./noteSearchHighlight";
 
 export {
   annotateNoteImageSizes,
@@ -146,6 +148,10 @@ export interface InlineMarkdownEditorProps {
   noteCodeFontSize?: number;
   /** Reports the active text-format toggles at the current selection (toolbar highlight). */
   onActiveFormatsChange?: (formats: ActiveTextFormats) => void;
+  /** Notes-tree search: highlight every match and reveal the active one. */
+  searchHighlight?: NoteSearchHighlightRequest;
+  /** Matches actually rendered in the current view (rich or source). */
+  onSearchMatchCountChange?: (count: number) => void;
 }
 
 export const NOTE_EDIT_DECORATION_DEBOUNCE_MS = 160;
@@ -914,6 +920,8 @@ export const InlineMarkdownEditor = React.memo(
       noteFontSize,
       noteCodeFontSize,
       onActiveFormatsChange,
+      searchHighlight,
+      onSearchMatchCountChange,
     }: InlineMarkdownEditorProps,
     ref,
   ) {
@@ -2061,6 +2069,18 @@ export const InlineMarkdownEditor = React.memo(
     return true;
   }, []);
 
+  // Declared after the note-switch effects on purpose: a deferred switch marks
+  // contentSwapPendingRef first, so highlights never land on the old document.
+  const isSearchHighlightBusy = useCallback(() => contentSwapPendingRef.current, []);
+  useNoteSearchHighlight({
+    containerRef,
+    request: searchHighlight,
+    enabled: editorMode !== "source" && !mdxFallbackActive && !isContentSwapping,
+    isBusy: isSearchHighlightBusy,
+    contentKey: `${noteId ?? ""}|${editorMode}`,
+    onMatchCountChange: onSearchMatchCountChange,
+  });
+
   return (
     <div
       ref={containerRef}
@@ -2183,6 +2203,8 @@ export const InlineMarkdownEditor = React.memo(
           onChange={commitSourceMarkdown}
           noteFontFamily={noteFontFamily}
           noteFontSize={noteCodeFontSize || noteFontSize}
+          searchHighlight={searchHighlight}
+          onSearchMatchCountChange={onSearchMatchCountChange}
         />
       ) : mdxFallbackActive ? (
         <div
@@ -2213,6 +2235,8 @@ export const InlineMarkdownEditor = React.memo(
             readOnly={editorMode === "preview"}
             noteFontFamily={noteFontFamily}
             noteFontSize={noteCodeFontSize || noteFontSize}
+            searchHighlight={searchHighlight}
+            onSearchMatchCountChange={onSearchMatchCountChange}
           />
         </div>
       ) : editorMode === "preview" && !displayMarkdown.trim() ? (

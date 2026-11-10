@@ -2,7 +2,15 @@ import type { Messages } from '../types';
 
 export const enVaultMessages: Messages = {
   // Notes
-  'notes.search.placeholder': 'Search notes, hosts, tags...',
+  'notes.search.placeholder': 'Search titles, content, tags, hosts...',
+  'notes.search.summary': '{notes} notes · {matches} matches',
+  'notes.search.moreMatches': '{count} more matches',
+  'notes.search.matchCount': '{count} matches in this note',
+  'notes.search.previousMatch': 'Previous match (Shift+Enter)',
+  'notes.search.nextMatch': 'Next match (Enter)',
+  'notes.search.close': 'Close search',
+  'notes.search.noMatchesInNote': 'No matches',
+  'notes.search.keyboardHint': 'Enter: next match · Shift+Enter: previous · Esc: clear',
   'notes.action.newNote': 'New Note',
   'notes.action.newGroup': 'New Folder',
   'notes.action.importMarkdown': 'Import Markdown',

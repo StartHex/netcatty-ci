@@ -2,7 +2,15 @@ import type { Messages } from '../types';
 
 export const zhTWVaultMessages: Messages = {
   // Notes
-  'notes.search.placeholder': '搜尋筆記、主機、標籤...',
+  'notes.search.placeholder': '搜尋標題、內文、標籤、主機...',
+  'notes.search.summary': '{notes} 篇筆記 · {matches} 處符合',
+  'notes.search.moreMatches': '還有 {count} 處符合',
+  'notes.search.matchCount': '本筆記中有 {count} 處符合',
+  'notes.search.previousMatch': '上一處符合（Shift+Enter）',
+  'notes.search.nextMatch': '下一處符合（Enter）',
+  'notes.search.close': '關閉搜尋',
+  'notes.search.noMatchesInNote': '無符合',
+  'notes.search.keyboardHint': 'Enter：下一處 · Shift+Enter：上一處 · Esc：清除',
   'notes.action.newNote': '新增筆記',
   'notes.action.newGroup': '新增資料夾',
   'notes.action.importMarkdown': '匯入 Markdown',

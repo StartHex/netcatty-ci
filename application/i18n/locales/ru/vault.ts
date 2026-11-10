@@ -2,7 +2,15 @@ import type { Messages } from '../types';
 
 export const ruVaultMessages: Messages = {
   // Notes
-  'notes.search.placeholder': 'Поиск заметок, хостов, тегов...',
+  'notes.search.placeholder': 'Поиск по заголовкам, тексту, тегам, хостам...',
+  'notes.search.summary': 'Заметок: {notes} · совпадений: {matches}',
+  'notes.search.moreMatches': 'Ещё совпадений: {count}',
+  'notes.search.matchCount': 'Совпадений в заметке: {count}',
+  'notes.search.previousMatch': 'Предыдущее совпадение (Shift+Enter)',
+  'notes.search.nextMatch': 'Следующее совпадение (Enter)',
+  'notes.search.close': 'Закрыть поиск',
+  'notes.search.noMatchesInNote': 'Нет совпадений',
+  'notes.search.keyboardHint': 'Enter: следующее · Shift+Enter: предыдущее · Esc: очистить',
   'notes.action.newNote': 'Новая заметка',
   'notes.action.newGroup': 'Новая папка',
   'notes.action.importMarkdown': 'Импорт Markdown',

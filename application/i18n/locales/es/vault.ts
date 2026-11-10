@@ -2,7 +2,15 @@ import type { Messages } from '../types';
 
 export const esVaultMessages: Messages = {
   // Notes
-  'notes.search.placeholder': 'Buscar notas, hosts, etiquetas...',
+  'notes.search.placeholder': 'Buscar en títulos, contenido, etiquetas, hosts...',
+  'notes.search.summary': '{notes} notas · {matches} coincidencias',
+  'notes.search.moreMatches': '{count} coincidencias más',
+  'notes.search.matchCount': '{count} coincidencias en esta nota',
+  'notes.search.previousMatch': 'Coincidencia anterior (Mayús+Intro)',
+  'notes.search.nextMatch': 'Siguiente coincidencia (Intro)',
+  'notes.search.close': 'Cerrar búsqueda',
+  'notes.search.noMatchesInNote': 'Sin coincidencias',
+  'notes.search.keyboardHint': 'Intro: siguiente · Mayús+Intro: anterior · Esc: limpiar',
   'notes.action.newNote': 'Nueva nota',
   'notes.action.newGroup': 'Nueva carpeta',
   'notes.action.importMarkdown': 'Importar Markdown',
