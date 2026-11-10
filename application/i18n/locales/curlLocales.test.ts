@@ -23,6 +23,9 @@ const PLACEHOLDER_KEYS: Record<string, string[]> = {
   "curl.folderDeleteMessage": ["{name}"],
   "curl.response.redirects": ["{count}"],
   "curl.body.invalidJson": ["{error}"],
+  "curl.sendingElapsed": ["{seconds}"],
+  "curl.response.largeBodyNotice": ["{size}"],
+  "curl.json.showMore": ["{count}"],
 };
 
 test("database messages exist in every bundled locale", () => {

@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock, Copy, History, Play, Plus, Save, Square, Wand2, X } from 'lucide-react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { Clock, Copy, History, Loader2, Play, Plus, Save, Square, Wand2, X } from 'lucide-react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useHttpClient, type CurlTab } from '../../application/state/useHttpClient';
+import type { CurlResponse } from '../../domain/models';
+import type { HttpWireWarning } from '../../domain/http/httpWire';
 import { useClipboardBackend } from '../../application/state/useClipboardBackend';
 import {
   HTTP_METHODS,
@@ -67,6 +69,26 @@ const formatBytes = (bytes: number): string => {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
+
+/**
+ * Bodies above this many characters are shown truncated: laying out an 8 MB
+ * single-line <pre> blocks the renderer for seconds. Copy still uses it all.
+ */
+export const MAX_RENDERED_RESPONSE_CHARS = 2_000_000;
+
+/** Elapsed milliseconds since `startedAt`, ticking while it is set. */
+const useElapsedMs = (startedAt: number | undefined): number => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return startedAt ? Math.max(0, now - startedAt) : 0;
+};
+
+const formatElapsed = (ms: number): string => (ms < 10_000 ? (ms / 1000).toFixed(1) : String(Math.round(ms / 1000)));
 
 const statusTone = (status: number): string => {
   if (status >= 500) return 'bg-rose-500/15 text-rose-600 dark:text-rose-400';
@@ -179,9 +201,10 @@ const UrlBar: React.FC<{
   tab: CurlTab;
   onUrlChange: (url: string) => void;
   onPartsChange: (patch: Partial<HttpUrlParts>) => void;
+  onSubmit: () => void;
   invalidPortLabel: string;
   invalidHostLabel: string;
-}> = ({ tab, onUrlChange, onPartsChange, invalidPortLabel, invalidHostLabel }) => {
+}> = ({ tab, onUrlChange, onPartsChange, onSubmit, invalidPortLabel, invalidHostLabel }) => {
   const { t } = useI18n();
   const parsed = useMemo(() => parseHttpUrl(tab.draft.url), [tab.draft.url]);
   // tsconfig has strictNullChecks off, so discriminated unions do not narrow here.
@@ -201,7 +224,12 @@ const UrlBar: React.FC<{
           value={tab.draft.url}
           placeholder="https://api.example.com/v1/items?page=1"
           onChange={(event) => onUrlChange(event.target.value)}
-          className={cn('h-9 flex-1 font-mono text-xs', urlInvalid && 'border-destructive')}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.keyCode === 229) return;
+            event.preventDefault();
+            onSubmit();
+          }}
+          className={cn('h-9 flex-1 font-mono text-xs transition-colors', urlInvalid && 'border-destructive')}
           aria-invalid={urlInvalid || undefined}
           data-testid="curl-url-input"
         />
@@ -245,12 +273,36 @@ const UrlBar: React.FC<{
   );
 };
 
-const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | null }> = ({ tab, writeClipboard }) => {
+interface ResponsePanelProps {
+  response: CurlResponse | undefined;
+  status: CurlTab['status'];
+  error: string | undefined;
+  warnings: HttpWireWarning[] | undefined;
+  sentAt: number | undefined;
+  completedAt: number | undefined;
+  writeClipboard: ClipboardWriter | null;
+}
+
+/**
+ * Memoized on the response fields: the request editor re-renders the surface
+ * on every keystroke, and re-parsing a multi-megabyte JSON body each time made
+ * typing in the URL bar lag.
+ */
+const ResponsePanel = memo(function ResponsePanel({
+  response,
+  status,
+  error,
+  warnings,
+  sentAt,
+  completedAt,
+  writeClipboard,
+}: ResponsePanelProps) {
   const { t } = useI18n();
   const [section, setSection] = useState<ResponseSection>('body');
   const [encoding, setEncoding] = useState<ResponseEncoding>('auto');
   const [bodyView, setBodyView] = useState<'tree' | 'raw'>('tree');
-  const response = tab.response;
+  const sending = status === 'sending';
+  const elapsedMs = useElapsedMs(sending ? sentAt : undefined);
 
   const effectiveEncoding: ResponseEncoding = useMemo(() => {
     if (encoding !== 'auto') return encoding;
@@ -262,23 +314,63 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
     return decodeResponseBody(response.bodyBase64, effectiveEncoding) ?? response.bodyText ?? '';
   }, [response, effectiveEncoding]);
 
+  // Parsed once per body: the tree view, the pretty text and the JSON check share it.
+  const parsedJson = useMemo(
+    () => (response?.bodyKind === 'json' ? safeParseJson(decodedBody) : undefined),
+    [decodedBody, response?.bodyKind],
+  );
+  const isJson = parsedJson !== undefined;
   const prettyBody = useMemo(() => {
     if (!decodedBody) return '';
-    const formatted = formatJsonText(decodedBody);
-    return formatted.ok ? formatted.text : decodedBody;
-  }, [decodedBody]);
+    if (parsedJson === undefined) return decodedBody;
+    try {
+      return JSON.stringify(parsedJson, null, 2);
+    } catch {
+      return decodedBody;
+    }
+  }, [decodedBody, parsedJson]);
+  const renderedBody = useMemo(
+    () => (decodedBody.length > MAX_RENDERED_RESPONSE_CHARS
+      ? decodedBody.slice(0, MAX_RENDERED_RESPONSE_CHARS)
+      : decodedBody),
+    [decodedBody],
+  );
+  const bodyClipped = renderedBody.length < decodedBody.length;
 
-  if (tab.status === 'sending') {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t('curl.sending')}</div>;
+  const progress = sending ? (
+    <div className="nc-progress-track shrink-0" role="progressbar" aria-busy="true" aria-label={t('curl.sending')} />
+  ) : null;
+
+  if (sending && !response) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        {progress}
+        <div className="nc-anim-fade-in flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin text-primary" />
+          <span className="tabular-nums">{t('curl.sendingElapsed', { seconds: formatElapsed(elapsedMs) })}</span>
+        </div>
+      </div>
+    );
   }
-  if (tab.error) {
+  if (error && !sending) {
+    // A user cancel leaves the tab idle with a notice; only real failures shake.
+    const userCancelled = status !== 'error';
     return (
       <div className="p-4">
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {tab.error}
+        <div
+          key={completedAt}
+          className={cn(
+            'rounded-md border px-3 py-2 text-sm',
+            userCancelled
+              ? 'nc-anim-fade-in border-border/70 bg-muted/40 text-muted-foreground'
+              : 'nc-anim-shake border-destructive/40 bg-destructive/10 text-destructive',
+          )}
+          role={userCancelled ? 'status' : 'alert'}
+        >
+          {error}
         </div>
-        {tab.warnings && tab.warnings.length > 0 ? (
-          <p className="mt-2 text-xs text-muted-foreground">{t('curl.warnings.droppedBody')}</p>
+        {warnings && warnings.length > 0 ? (
+          <p className="nc-anim-fade-in mt-2 text-xs text-muted-foreground">{t('curl.warnings.droppedBody')}</p>
         ) : null}
       </div>
     );
@@ -292,13 +384,24 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
   }
 
   const isBinary = response.bodyKind === 'binary';
-  const isJson = response.bodyKind === 'json' && safeParseJson(prettyBody) !== undefined;
   const copyPayload = decodedBody || response.bodyBase64 || '';
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
+      {progress}
+      {sending ? (
+        <div className="nc-anim-pop-in pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-border/70 bg-background/95 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
+          <Loader2 className="h-3 w-3 animate-spin text-primary" />
+          <span className="tabular-nums">{t('curl.sendingElapsed', { seconds: formatElapsed(elapsedMs) })}</span>
+        </div>
+      ) : null}
+      <div
+        key={completedAt}
+        className="nc-anim-fade-in nc-stale-content flex min-h-0 flex-1 flex-col"
+        data-stale={sending ? 'true' : undefined}
+      >
       <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2 text-xs">
-        <span className={cn('rounded px-2 py-0.5 font-semibold', statusTone(response.status))}>
+        <span className={cn('nc-anim-pop-in rounded px-2 py-0.5 font-semibold', statusTone(response.status))}>
           {response.status} {response.statusText}
         </span>
         <span className="flex items-center gap-1 text-muted-foreground">
@@ -326,7 +429,7 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
                       type="button"
                       onClick={() => setBodyView(view)}
                       className={cn(
-                        'rounded px-1.5 py-0.5 text-[11px]',
+                        'nc-tab-button rounded px-1.5 py-0.5 text-[11px]',
                         bodyView === view ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
                       )}
                     >
@@ -370,7 +473,7 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
               type="button"
               onClick={() => setSection(item)}
               className={cn(
-                'rounded px-2 py-1 text-xs',
+                'nc-tab-button rounded px-2 py-1 text-xs',
                 section === item ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
             >
@@ -379,6 +482,11 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
           ))}
         </div>
       </div>
+      {bodyClipped && section !== 'headers' ? (
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-700 dark:text-amber-300">
+          {t('curl.response.largeBodyNotice', { size: formatBytes(MAX_RENDERED_RESPONSE_CHARS) })}
+        </div>
+      ) : null}
       <ScrollArea className="min-h-0 flex-1">
         {section === 'body' ? (
           isBinary ? (
@@ -390,6 +498,7 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
                 expand: t('curl.json.expand'),
                 collapse: t('curl.json.collapse'),
                 copyValue: t('curl.json.copyValue'),
+                showMore: (remaining) => t('curl.json.showMore', { count: remaining }),
               }}
               onCopyValue={(text) =>
                 void copyTextWithFeedback(writeClipboard, text, t('curl.response.copied'), t('curl.copyFailed'))
@@ -397,7 +506,7 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
             />
           ) : (
             <LineNumberedPre
-              text={decodedBody}
+              text={renderedBody}
               className="p-3"
               containerClassName="h-full"
               data-testid="curl-response-body"
@@ -406,7 +515,9 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
         ) : null}
         {section === 'raw' ? (
           <LineNumberedPre
-            text={isBinary ? response.bodyBase64 ?? '' : decodedBody}
+            text={isBinary
+              ? (response.bodyBase64 ?? '').slice(0, MAX_RENDERED_RESPONSE_CHARS)
+              : renderedBody}
             className="p-3"
             containerClassName="h-full"
             data-testid="curl-response-raw"
@@ -423,9 +534,10 @@ const ResponsePanel: React.FC<{ tab: CurlTab; writeClipboard: ClipboardWriter | 
           </div>
         ) : null}
       </ScrollArea>
+      </div>
     </div>
   );
-};
+});
 
 export const CurlClientSurface: React.FC<{
   tabId: string | null;
@@ -510,8 +622,20 @@ export const CurlClientSurface: React.FC<{
   const copyBody = () =>
     void copyTextWithFeedback(writeClipboardText, tab.draft.body.text, t('curl.response.copied'), t('curl.copyFailed'));
 
+  const sendActive = () => {
+    if (!sending) void client.send(tab.id);
+  };
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div
+      className="flex h-full min-h-0 flex-col bg-background"
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+        event.preventDefault();
+        sendActive();
+      }}
+    >
       <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
         <Select
           value={tab.draft.method}
@@ -533,12 +657,13 @@ export const CurlClientSurface: React.FC<{
 
         <Button
           size="sm"
-          className="h-9 gap-1"
-          onClick={() => void client.send(tab.id)}
+          className="h-9 min-w-[76px] gap-1 transition-all"
+          onClick={sendActive}
           disabled={sending}
+          title={t('curl.sendShortcut')}
           data-testid="curl-send"
         >
-          <Play size={14} /> {t('curl.send')}
+          {sending ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} {t('curl.send')}
         </Button>
         <Button
           size="sm"
@@ -565,7 +690,13 @@ export const CurlClientSurface: React.FC<{
           onChange={(event) => client.patchDraft(tab.id, { name: event.target.value })}
           className="h-9 w-[200px] text-xs"
         />
-        <span className="text-[11px] text-muted-foreground">
+        <span
+          key={tab.dirty ? 'dirty' : 'clean'}
+          className={cn(
+            'nc-anim-fade-in text-[11px]',
+            tab.dirty ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+          )}
+        >
           {tab.dirty ? t('curl.unsaved') : t('curl.savedState')}
         </span>
 
@@ -615,6 +746,7 @@ export const CurlClientSurface: React.FC<{
           tab={tab}
           onUrlChange={(url) => client.setUrl(tab.id, url)}
           onPartsChange={onPartsChange}
+          onSubmit={sendActive}
           invalidPortLabel={invalidPortLabel}
           invalidHostLabel={invalidHostLabel}
         />
@@ -634,7 +766,7 @@ export const CurlClientSurface: React.FC<{
                 type="button"
                 onClick={() => setSection(item)}
                 className={cn(
-                  'rounded px-2 py-1 text-xs',
+                  'nc-tab-button rounded px-2 py-1 text-xs',
                   section === item ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
                 )}
               >
@@ -921,6 +1053,7 @@ export const CurlClientSurface: React.FC<{
                           expand: t('curl.json.expand'),
                           collapse: t('curl.json.collapse'),
                           copyValue: t('curl.json.copyValue'),
+                          showMore: (remaining) => t('curl.json.showMore', { count: remaining }),
                         }}
                         onCopyValue={(text) =>
                           void copyTextWithFeedback(
@@ -949,7 +1082,17 @@ export const CurlClientSurface: React.FC<{
               ) : null}
         </div>
         }
-        bottom={<ResponsePanel tab={tab} writeClipboard={writeClipboardText} />}
+        bottom={(
+          <ResponsePanel
+            response={tab.response}
+            status={tab.status}
+            error={tab.error}
+            warnings={tab.warnings}
+            sentAt={tab.sentAt}
+            completedAt={tab.completedAt}
+            writeClipboard={writeClipboardText}
+          />
+        )}
       />
       <CurlHistoryDialog
         entry={historyEntry}

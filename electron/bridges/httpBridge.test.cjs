@@ -9,6 +9,8 @@ const { handlers, MAX_BODY_BYTES, __test } = require("./httpBridge.cjs");
 
 let server;
 let baseUrl;
+let otherServer;
+let otherBaseUrl;
 
 const listen = () =>
   new Promise((resolve) => {
@@ -57,6 +59,66 @@ const listen = () =>
         }, 3000);
         return;
       }
+      if (url.pathname === "/echo-headers") {
+        const chunks = [];
+        req.on("data", (chunk) => chunks.push(chunk));
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            method: req.method,
+            body: Buffer.concat(chunks).toString("utf8"),
+            headers: req.headers,
+          }));
+        });
+        return;
+      }
+      if (url.pathname === "/redirect-303") {
+        req.resume();
+        res.writeHead(303, { Location: "/echo-headers" });
+        res.end();
+        return;
+      }
+      if (url.pathname === "/redirect-same-origin") {
+        res.writeHead(302, { Location: "/echo-headers" });
+        res.end();
+        return;
+      }
+      if (url.pathname === "/redirect-cross-origin") {
+        res.writeHead(302, { Location: `${otherBaseUrl}/echo-headers` });
+        res.end();
+        return;
+      }
+      if (url.pathname === "/stream-forever") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        const chunk = Buffer.alloc(256 * 1024, 7);
+        const pump = () => {
+          while (!res.destroyed && res.write(chunk)) {
+            // keep the socket buffer full
+          }
+          if (!res.destroyed) res.once("drain", pump);
+        };
+        res.on("close", () => res.removeAllListeners("drain"));
+        pump();
+        return;
+      }
+      if (url.pathname === "/gzip-bomb") {
+        const payload = zlib.gzipSync(Buffer.alloc(20 * 1024 * 1024, 0x61));
+        res.writeHead(200, { "Content-Type": "text/plain", "Content-Encoding": "gzip" });
+        res.end(payload);
+        return;
+      }
+      if (url.pathname === "/trickle") {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        const timer = setInterval(() => {
+          if (res.destroyed) {
+            clearInterval(timer);
+            return;
+          }
+          res.write(".");
+        }, 100);
+        res.on("close", () => clearInterval(timer));
+        return;
+      }
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("missing");
     });
@@ -78,8 +140,29 @@ const wire = (overrides) => ({
   ...overrides,
 });
 
-test.before(listen);
-test.after(() => new Promise((resolve) => server.close(resolve)));
+const listenOther = () =>
+  new Promise((resolve) => {
+    otherServer = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ headers: req.headers }));
+    });
+    otherServer.listen(0, "127.0.0.1", () => {
+      // Same host, different port: a different origin.
+      otherBaseUrl = `http://localhost:${otherServer.address().port}`;
+      resolve();
+    });
+  });
+
+test.before(async () => {
+  await listenOther();
+  await listen();
+});
+test.after(async () => {
+  server.closeAllConnections?.();
+  otherServer.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => otherServer.close(resolve));
+});
 
 test("send returns a shaped JSON response", async () => {
   const result = await handlers.send({ wire: wire() });
@@ -207,4 +290,117 @@ test("normalizeError maps node error codes", () => {
   assert.equal(__test.normalizeError({ code: "ECONNREFUSED", message: "x" }).code, "connection");
   assert.equal(__test.normalizeError({ code: "DEPTH_ZERO_SELF_SIGNED_CERT", message: "x" }).code, "tls");
   assert.equal(__test.normalizeError(new Error("Request cancelled")).code, "cancelled");
+});
+
+test("a cancel that arrives before send registers still cancels the request", async () => {
+  const target = wire({ url: `${baseUrl}/slow`, timeoutMs: 5000 });
+  assert.deepEqual(handlers.cancel({ requestId: target.id }), { ok: true, cancelled: false });
+  const started = Date.now();
+  const result = await handlers.send({ wire: target });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "cancelled");
+  assert.ok(Date.now() - started < 1000, "the request must not run to completion");
+  assert.equal(__test.activeRequests.has(target.id), false);
+});
+
+test("bodies are sent with Content-Length instead of chunked encoding", async () => {
+  const result = await handlers.send({
+    wire: wire({ method: "POST", url: `${baseUrl}/echo-headers`, bodyText: "héllo" }),
+  });
+  assert.equal(result.ok, true);
+  const echoed = JSON.parse(result.response.bodyText);
+  assert.equal(echoed.body, "héllo");
+  assert.equal(echoed.headers["content-length"], String(Buffer.byteLength("héllo")));
+  assert.equal(echoed.headers["transfer-encoding"], undefined);
+});
+
+test("a 303 redirect switches to GET and drops the body headers", async () => {
+  const result = await handlers.send({
+    wire: wire({
+      method: "POST",
+      url: `${baseUrl}/redirect-303`,
+      bodyText: '{"a":1}',
+      headers: [{ key: "Content-Type", value: "application/json" }],
+    }),
+  });
+  assert.equal(result.ok, true);
+  const echoed = JSON.parse(result.response.bodyText);
+  assert.equal(echoed.method, "GET");
+  assert.equal(echoed.body, "");
+  assert.equal(echoed.headers["content-type"], undefined);
+  assert.equal(echoed.headers["content-length"], undefined);
+});
+
+test("credentials follow same-origin redirects but not cross-origin ones", async () => {
+  const headers = [
+    { key: "Authorization", value: "Bearer secret" },
+    { key: "Cookie", value: "sid=1" },
+    { key: "X-Trace", value: "keep" },
+  ];
+  const same = await handlers.send({ wire: wire({ url: `${baseUrl}/redirect-same-origin`, headers }) });
+  assert.equal(same.ok, true);
+  const sameHeaders = JSON.parse(same.response.bodyText).headers;
+  assert.equal(sameHeaders.authorization, "Bearer secret");
+  assert.equal(sameHeaders.cookie, "sid=1");
+
+  const cross = await handlers.send({ wire: wire({ url: `${baseUrl}/redirect-cross-origin`, headers }) });
+  assert.equal(cross.ok, true);
+  const crossHeaders = JSON.parse(cross.response.bodyText).headers;
+  assert.equal(crossHeaders.authorization, undefined);
+  assert.equal(crossHeaders.cookie, undefined);
+  assert.equal(crossHeaders["x-trace"], "keep");
+});
+
+test("an endless body is cut at the cap instead of downloading until the timeout", async () => {
+  const started = Date.now();
+  const result = await handlers.send({ wire: wire({ url: `${baseUrl}/stream-forever`, timeoutMs: 20000 }) });
+  assert.equal(result.ok, true);
+  assert.equal(result.response.truncated, true);
+  assert.equal(result.response.sizeBytes, MAX_BODY_BYTES);
+  assert.ok(Date.now() - started < 10000, "truncation must stop the download");
+});
+
+test("decompression output is capped (gzip bomb)", async () => {
+  const result = await handlers.send({ wire: wire({ url: `${baseUrl}/gzip-bomb` }) });
+  assert.equal(result.ok, true);
+  assert.equal(result.response.truncated, true);
+  assert.ok(result.response.sizeBytes <= MAX_BODY_BYTES);
+  assert.ok(result.response.bodyText.startsWith("aaaa"));
+});
+
+test("the timeout is a hard deadline even while bytes keep trickling in", async () => {
+  const started = Date.now();
+  const result = await handlers.send({ wire: wire({ url: `${baseUrl}/trickle`, timeoutMs: 1000 }) });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "timeout");
+  assert.ok(Date.now() - started < 4000);
+});
+
+test("decodeBodyCapped decodes truncated gzip input as far as it goes", async () => {
+  const full = zlib.gzipSync(Buffer.from("x".repeat(100000)));
+  const partial = full.subarray(0, Math.floor(full.length / 2));
+  const decoded = await __test.decodeBodyCapped(partial, "gzip", 1024 * 1024);
+  assert.equal(decoded.decoded, true);
+  assert.ok(decoded.buffer.length > 0);
+  assert.ok(/^x+$/.test(decoded.buffer.toString("utf8")));
+  const passthrough = await __test.decodeBodyCapped(Buffer.from("plain"), "", 10);
+  assert.equal(passthrough.decoded, false);
+  assert.equal(passthrough.buffer.toString("utf8"), "plain");
+});
+
+test("headersForRedirect drops body and credential headers as requested", () => {
+  const headers = [
+    { key: "Authorization", value: "a" },
+    { key: "Content-Type", value: "b" },
+    { key: "Host", value: "example.com" },
+    { key: "X-Keep", value: "c" },
+  ];
+  assert.deepEqual(
+    __test.headersForRedirect(headers, { dropsBody: true, crossOrigin: false }).map((h) => h.key),
+    ["Authorization", "Host", "X-Keep"],
+  );
+  assert.deepEqual(
+    __test.headersForRedirect(headers, { dropsBody: false, crossOrigin: true }).map((h) => h.key),
+    ["Content-Type", "X-Keep"],
+  );
 });

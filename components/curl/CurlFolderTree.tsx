@@ -527,8 +527,8 @@ const FolderRow: React.FC<{ node: CurlFolderNode; depth: number }> = ({ node, de
 
       <div
         className={cn(
-          'grid transition-[grid-template-rows] duration-200 ease-out',
-          isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]',
+          'grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none',
+          isCollapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
         )}
       >
         <div className="min-h-0 overflow-hidden">
