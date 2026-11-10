@@ -116,17 +116,45 @@ function columnWidths(result: DbQueryResult | undefined): number[] {
 }
 
 function StatusDot({ tab }: { tab: DatabaseTab }) {
+  // Same element in every state, so the color cross-fades and the "ready"
+  // ping plays exactly when the class is added.
   if (tab.status === 'connecting') {
-    return <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />;
+    return <span className="nc-status-dot h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />;
   }
   if (tab.status === 'error' || !tab.connected) {
-    return <span className="h-1.5 w-1.5 rounded-full bg-destructive" />;
+    return <span className="nc-status-dot h-1.5 w-1.5 shrink-0 rounded-full bg-destructive" />;
   }
   if (tab.offline) {
-    return <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="offline" />;
+    return <span className="nc-status-dot nc-status-dot--warn h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" title="offline" />;
   }
-  return <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />;
+  return <span className="nc-status-dot nc-status-dot--ready h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />;
 }
+
+const formatElapsedSeconds = (ms: number): string =>
+  ms < 10_000 ? (ms / 1000).toFixed(1) : String(Math.round(ms / 1000));
+
+/**
+ * Live "running for 3.2 s" counter. Its own component so the 100 ms ticks
+ * re-render only this label, not the editor and the result grid.
+ */
+const RunElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => string }> = ({
+  startedAt,
+  format,
+}) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  if (!startedAt) return null;
+  return (
+    <span className="nc-anim-fade-in whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
+      {format(formatElapsedSeconds(Math.max(0, now - startedAt)))}
+    </span>
+  );
+};
 
 interface DatabaseWorkbenchSurfaceProps {
   /** Workbench tab id (without the `database:` prefix), or null when idle. */
@@ -519,12 +547,12 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       <StatusDot tab={tab} />
       <span className="truncate font-medium">{tab.title}</span>
       {tab.transactionOpen ? (
-        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
-          {t('databases.workbench.beginTransaction')}
+        <span className="nc-anim-pop-in rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+          {t('databases.workbench.transactionActive')}
         </span>
       ) : null}
       {tab.executingStatement ? (
-        <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+        <span className="nc-anim-fade-in rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">
           {t('databases.workbench.statementProgress', {
             index: tab.executingStatement.index,
             total: tab.executingStatement.total,
@@ -574,13 +602,17 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
         <Button
           size="sm"
           variant="outline"
-          className="h-7 text-xs"
+          className="nc-anim-pop-in h-7 text-xs"
           onClick={() => workbench.cancelQuery(tab.id)}
         >
           <Square className="mr-1 h-3 w-3" />
           {t('databases.workbench.cancel')}
         </Button>
       ) : null}
+      <RunElapsed
+        startedAt={tab.running ? tab.runStartedAt : undefined}
+        format={(seconds) => t('databases.workbench.runningElapsed', { seconds })}
+      />
       <Popover>
         <PopoverTrigger asChild>
           <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
@@ -669,17 +701,18 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           <Button
             size="sm"
             variant="outline"
-            className="h-7 text-xs"
-            disabled={tab.running}
+            className="nc-anim-pop-in h-7 text-xs"
+            disabled={tab.running || tab.transactionBusy}
             onClick={() => void workbench.commitTransaction(tab.id)}
           >
+            {tab.transactionBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
             {t('databases.workbench.commit')}
           </Button>
           <Button
             size="sm"
             variant="ghost"
-            className="h-7 text-xs"
-            disabled={tab.running}
+            className="nc-anim-pop-in h-7 text-xs"
+            disabled={tab.running || tab.transactionBusy}
             onClick={() => void workbench.rollbackTransaction(tab.id)}
           >
             {t('databases.workbench.rollback')}
@@ -690,9 +723,10 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           size="sm"
           variant="ghost"
           className="h-7 text-xs"
-          disabled={tab.running || !tab.connected}
+          disabled={tab.running || !tab.connected || tab.transactionBusy}
           onClick={() => void workbench.beginTransaction(tab.id)}
         >
+          {tab.transactionBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
           {t('databases.workbench.beginTransaction')}
         </Button>
       )}
@@ -758,7 +792,8 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
         <Button
           size="sm"
           variant={tab.offline && tab.status !== 'error' ? 'default' : 'outline'}
-          className="h-7 text-xs"
+          className="nc-anim-pop-in h-7 text-xs"
+          disabled={tab.status === 'connecting'}
           onClick={() => void workbench.reconnect(tab.id)}
         >
           <RotateCw className="mr-1 h-3 w-3" />
@@ -827,8 +862,20 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     />
 
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {tab.running ? (
+        <div
+          className="nc-progress-track shrink-0"
+          role="progressbar"
+          aria-busy="true"
+          aria-label={t('databases.workbench.running')}
+        />
+      ) : null}
       {tab.error ? (
-        <div className="shrink-0 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        <div
+          key={tab.error}
+          role="alert"
+          className="nc-anim-slide-down shrink-0 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+        >
           <div className="flex items-start gap-1.5">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <div className="min-w-0 space-y-0.5">
@@ -863,7 +910,13 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           t={t}
         />
       ) : tab.result && tab.result.columns.length > 0 ? (
-        <>
+        // Keyed per run (not per edit): a new result fades in, an in-place
+        // cell edit keeps the grid and its scroll position.
+        <div
+          key={`${tab.durationMs ?? ''}:${tab.activeResultIndex ?? 0}`}
+          className="nc-anim-fade-in nc-stale-content flex min-h-0 min-w-0 flex-1 flex-col"
+          data-stale={tab.running ? 'true' : undefined}
+        >
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
             <div className="flex min-w-0 items-center gap-1 rounded border border-border/60 px-1.5">
               <Search className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -980,14 +1033,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             onClearSelection={() => setSelectedColumns([])}
             rowNumberStart={pageIndex * pageSize}
           />
-        </>
+        </div>
       ) : (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <ArrowUpDown className="h-5 w-5 text-muted-foreground/60" />
+        <div
+          key={tab.status === 'connecting' ? 'connecting' : tab.running ? 'running' : 'empty'}
+          className="nc-anim-fade-in flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+        >
+          {tab.status === 'connecting' || tab.running ? (
+            <Loader2 className="h-5 w-5 animate-spin text-primary/80" />
+          ) : (
+            <ArrowUpDown className="h-5 w-5 text-muted-foreground/60" />
+          )}
           <p className="max-w-md text-xs text-muted-foreground">
             {tab.status === 'connecting'
               ? t('databases.workbench.connecting')
-              : t('databases.workbench.emptyHint')}
+              : tab.running
+                ? t('databases.workbench.running')
+                : t('databases.workbench.emptyHint')}
           </p>
         </div>
       )}
@@ -1522,7 +1584,19 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-1">
         {tab.tablesError ? (
-          <p className="px-1 py-2 text-[11px] text-destructive">{tab.tablesError}</p>
+          <p className="nc-anim-fade-in px-1 py-2 text-[11px] text-destructive">{tab.tablesError}</p>
+        ) : grouped.length === 0 && tab.tablesLoading && !tableQuery.trim() ? (
+          <div className="space-y-1.5 px-1 py-1.5" aria-busy="true" aria-label={t('databases.schema.loading')}>
+            {[72, 56, 84, 64, 48, 76].map((width, index) => (
+              <div key={index} className="flex items-center gap-1.5">
+                <span className="h-3 w-3 shrink-0 animate-pulse rounded-sm bg-muted" />
+                <span
+                  className="h-2.5 animate-pulse rounded-sm bg-muted"
+                  style={{ width: `${width}%`, animationDelay: `${index * 90}ms` }}
+                />
+              </div>
+            ))}
+          </div>
         ) : grouped.length === 0 ? (
           <p className="px-1 py-2 text-[11px] text-muted-foreground">
             {tab.tablesLoading
@@ -1533,7 +1607,7 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
           </p>
         ) : (
           grouped.map(([schema, tables]) => (
-            <div key={schema} className="mb-1">
+            <div key={schema} className="nc-anim-fade-in mb-1">
               {grouped.length > 1 ? (
                 <p className="px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
                   {schema}

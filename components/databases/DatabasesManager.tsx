@@ -6,7 +6,6 @@
 
 import {
   ChevronDown,
-  ChevronRight,
   Copy,
   Database,
   Download,
@@ -297,20 +296,23 @@ export const DatabasesManager: React.FC<DatabasesManagerProps> = ({
                   {grouped.length > 1 || group ? (
                     <button
                       type="button"
-                      className="mb-2 flex w-full items-center gap-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+                      className="mb-2 flex w-full items-center gap-1.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                      aria-expanded={!collapsed}
                       onClick={() => toggleGroup(group)}
                     >
-                      {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                      <ChevronDown
+                        className={cn('h-3 w-3 transition-transform duration-200', collapsed && '-rotate-90')}
+                      />
                       <span className="truncate">{group || t('databases.groupUngrouped')}</span>
                       <span className="text-[10px] opacity-70">{items.length}</span>
                     </button>
                   ) : null}
                   {collapsed ? null : (
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="nc-stagger grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {items.map((connection) => (
               <div
                 key={connection.id}
-                className="group flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-3 transition-colors hover:border-border"
+                className="nc-card-hover group flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-3 hover:border-border"
               >
                 <div className="flex items-start gap-2">
                   <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">

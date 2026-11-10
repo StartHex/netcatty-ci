@@ -3,8 +3,8 @@
  * section list stays a plain list; the form owns no persistence.
  */
 
-import { Eye, EyeOff, FolderOpen, Loader2, Plus, TestTube2, X } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import { CheckCircle2, Eye, EyeOff, FolderOpen, Loader2, Plus, TestTube2, X, XCircle } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import {
   DATABASE_DEFAULT_PORTS,
@@ -136,6 +136,24 @@ export function formFromConnection(connection: DatabaseConnection): FormState {
   };
 }
 
+/** "Testing connection… 3.2 s" — ticks on its own so the form does not re-render. */
+const TestElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => string; fallback: string }> = ({
+  startedAt,
+  format,
+  fallback,
+}) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  if (!startedAt) return <>{fallback}</>;
+  const elapsed = Math.max(0, now - startedAt);
+  return <>{format(elapsed < 10_000 ? (elapsed / 1000).toFixed(1) : String(Math.round(elapsed / 1000)))}</>;
+};
+
 interface TestState {
   status: 'idle' | 'testing' | 'ok' | 'error';
   message?: string;
@@ -177,6 +195,15 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
   const [javaInfo, setJavaInfo] = useState<{ ok: boolean; text: string } | null>(null);
   const [javaChecking, setJavaChecking] = useState(false);
   const [test, setTest] = useState<TestState>({ status: 'idle' });
+  // Every edit (and every new test) bumps this, so a slow test that finishes
+  // after the form changed cannot report on settings that are gone.
+  const testSeqRef = useRef(0);
+  const [testStartedAt, setTestStartedAt] = useState<number | undefined>(undefined);
+  const resetTest = () => {
+    testSeqRef.current += 1;
+    setTest({ status: 'idle' });
+    setTestStartedAt(undefined);
+  };
   const [showError, setShowError] = useState(false);
   // Mask the stored password by default; the eye toggle mirrors the SSH host
   // form so both connection forms behave the same way.
@@ -188,7 +215,9 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
     // Restore an unfinished draft: dismissing the dialog (outside click, Esc,
     // switching windows) must never throw away what the user already typed.
     setForm(draftCache.get(draftKey) ?? (connection ? formFromConnection(connection) : EMPTY_FORM));
+    testSeqRef.current += 1;
     setTest({ status: 'idle' });
+    setTestStartedAt(undefined);
     setShowError(false);
     setShowPassword(false);
   }, [open, connection, draftKey]);
@@ -199,7 +228,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
       draftCache.set(draftKey, next);
       return next;
     });
-    setTest({ status: 'idle' });
+    resetTest();
   };
 
   const changeKind = (kind: DatabaseKind) => {
@@ -217,7 +246,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
       draftCache.set(draftKey, next);
       return next;
     });
-    setTest({ status: 'idle' });
+    resetTest();
   };
 
   const isSqlite = form.kind === 'sqlite';
@@ -288,9 +317,19 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
       setShowError(true);
       return;
     }
-    setTest({ status: 'testing' });
     if (!onTestConnection) return;
-    const result = await onTestConnection(draft);
+    testSeqRef.current += 1;
+    const seq = testSeqRef.current;
+    setTest({ status: 'testing' });
+    setTestStartedAt(Date.now());
+    let result: DbTestConnectionResult;
+    try {
+      result = await onTestConnection(draft);
+    } catch (error) {
+      result = { ok: false, durationMs: 0, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (seq !== testSeqRef.current) return;
+    setTestStartedAt(undefined);
     if (result.ok) {
       setTest({
         status: 'ok',
@@ -324,7 +363,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
       draftCache.set(draftKey, next);
       return next;
     });
-    setTest({ status: 'idle' });
+    resetTest();
   };
 
   const addDriverJar = async () => {
@@ -371,7 +410,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
       <DialogContent
-        className="flex max-h-[92vh] w-[calc(100vw-2rem)] max-w-[640px] flex-col overflow-hidden"
+        className="nc-anim-pop-in flex max-h-[92vh] w-[calc(100vw-2rem)] max-w-[640px] flex-col overflow-hidden"
         // A stray click outside must not dismiss the form: the footer holds
         // the only way to save, and small screens put it off-view.
         onPointerDownOutside={(event) => event.preventDefault()}
@@ -468,7 +507,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
                         ? (driver.jarPaths?.length ? driver.jarPaths : [driver.jarPath])
                         : prev.jdbcDriverPaths,
                     }));
-                    setTest({ status: 'idle' });
+                    resetTest();
                   }}
                 >
                   <SelectTrigger>
@@ -842,13 +881,33 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
 
           {test.status !== 'idle' ? (
             <div
-              className={`rounded-md border px-3 py-2 text-xs ${
+              key={test.status}
+              role={test.status === 'error' ? 'alert' : 'status'}
+              className={cn(
+                'flex items-start gap-2 rounded-md border px-3 py-2 text-xs transition-colors',
                 test.status === 'error'
-                  ? 'border-destructive/40 bg-destructive/10 text-destructive'
-                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-              }`}
+                  ? 'nc-anim-shake border-destructive/40 bg-destructive/10 text-destructive'
+                  : test.status === 'testing'
+                    ? 'nc-anim-fade-in border-border/70 bg-muted/40 text-muted-foreground'
+                    : 'nc-anim-pop-in border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+              )}
             >
-              {test.status === 'testing' ? t('databases.testing') : test.message}
+              {test.status === 'testing' ? (
+                <Loader2 className="mt-px h-3.5 w-3.5 shrink-0 animate-spin" />
+              ) : test.status === 'error' ? (
+                <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+                {test.status === 'testing' ? (
+                  <TestElapsed
+                    startedAt={testStartedAt}
+                    format={(seconds) => t('databases.testingElapsed', { seconds })}
+                    fallback={t('databases.testing')}
+                  />
+                ) : test.message}
+              </span>
             </div>
           ) : null}
         </div>

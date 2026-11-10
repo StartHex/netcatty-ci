@@ -241,4 +241,11 @@ export const ruDatabaseMessages: Messages = {
   'databases.ai.schemaHint': 'Список таблиц из панели схемы будет передан как контекст.',
   'databases.ai.noSchemaHint': 'Обновите панель схемы, чтобы передать имена таблиц.',
   'databases.ai.emptyResponse': 'Модель вернула пустой ответ.',
+  'databases.testingElapsed': 'Проверка подключения… {seconds} с',
+  'databases.workbench.runningElapsed': 'Выполняется {seconds} с',
+  'databases.workbench.transactionActive': 'Транзакция открыта',
+  'databases.workbench.queryCancelled': 'Запрос отменён.',
+  'databases.workbench.queryTimeout': 'Время выполнения истекло, запрос отменён.',
+  'databases.workbench.transactionLost': 'Соединение разорвано, сервер откатил открытую транзакцию. Начните новую транзакцию и выполните запросы снова.',
+  'databases.workbench.connectTimeout': 'Истекло время подключения к базе данных.',
 };

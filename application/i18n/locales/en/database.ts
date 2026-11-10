@@ -241,4 +241,11 @@ export const enDatabaseMessages: Messages = {
   'databases.ai.schemaHint': 'Table list from the schema panel is included as context.',
   'databases.ai.noSchemaHint': 'Refresh the schema panel to include table names as context.',
   'databases.ai.emptyResponse': 'The model returned an empty answer.',
+  'databases.testingElapsed': 'Testing connection… {seconds}s',
+  'databases.workbench.runningElapsed': 'Running {seconds}s',
+  'databases.workbench.transactionActive': 'In transaction',
+  'databases.workbench.queryCancelled': 'Query cancelled.',
+  'databases.workbench.queryTimeout': 'The statement timed out and was cancelled.',
+  'databases.workbench.transactionLost': 'The connection dropped and the server rolled back the open transaction. Start a new transaction and run the statements again.',
+  'databases.workbench.connectTimeout': 'Connecting to the database timed out.',
 };

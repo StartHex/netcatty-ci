@@ -241,4 +241,11 @@ export const esDatabaseMessages: Messages = {
   'databases.ai.schemaHint': 'La lista de tablas del panel de esquema se incluye como contexto.',
   'databases.ai.noSchemaHint': 'Actualiza el panel de esquema para incluir nombres de tablas.',
   'databases.ai.emptyResponse': 'El modelo devolvió una respuesta vacía.',
+  'databases.testingElapsed': 'Probando la conexión… {seconds} s',
+  'databases.workbench.runningElapsed': 'En ejecución {seconds} s',
+  'databases.workbench.transactionActive': 'En transacción',
+  'databases.workbench.queryCancelled': 'Consulta cancelada.',
+  'databases.workbench.queryTimeout': 'La sentencia superó el tiempo límite y se canceló.',
+  'databases.workbench.transactionLost': 'Se perdió la conexión y el servidor revirtió la transacción abierta. Inicia una nueva transacción y vuelve a ejecutar las sentencias.',
+  'databases.workbench.connectTimeout': 'Se agotó el tiempo de conexión con la base de datos.',
 };

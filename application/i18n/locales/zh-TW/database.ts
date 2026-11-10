@@ -241,4 +241,11 @@ export const zhTNDatabaseMessages: Messages = {
   'databases.ai.schemaHint': '會把左側表結構裡的表名作為上下文。',
   'databases.ai.noSchemaHint': '重新整理左側表結構可把表名作為上下文。',
   'databases.ai.emptyResponse': '模型回傳了空回答。',
+  'databases.testingElapsed': '正在測試連線… {seconds} 秒',
+  'databases.workbench.runningElapsed': '已執行 {seconds} 秒',
+  'databases.workbench.transactionActive': '交易進行中',
+  'databases.workbench.queryCancelled': '查詢已取消。',
+  'databases.workbench.queryTimeout': '陳述式執行逾時，已取消。',
+  'databases.workbench.transactionLost': '連線已中斷，伺服器已回滾未提交的交易。請重新開始交易後再執行陳述式。',
+  'databases.workbench.connectTimeout': '連線資料庫逾時。',
 };

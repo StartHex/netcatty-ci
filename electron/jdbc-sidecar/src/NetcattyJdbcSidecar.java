@@ -95,14 +95,30 @@ public final class NetcattyJdbcSidecar {
       case "METACOLUMNS":
         metaColumns(id, params);
         return;
-      case "COMMIT":
-        connection(params).commit();
+      case "BEGIN":
+        // Statements run in auto-commit mode; a transaction is simply
+        // auto-commit switched off until COMMIT / ROLLBACK.
+        connection(params).setAutoCommit(false);
         ok(id, Map.of());
         return;
-      case "ROLLBACK":
-        connection(params).rollback();
+      case "COMMIT": {
+        Connection connection = connection(params);
+        if (!connection.getAutoCommit()) {
+          connection.commit();
+          connection.setAutoCommit(true);
+        }
         ok(id, Map.of());
         return;
+      }
+      case "ROLLBACK": {
+        Connection connection = connection(params);
+        if (!connection.getAutoCommit()) {
+          connection.rollback();
+          connection.setAutoCommit(true);
+        }
+        ok(id, Map.of());
+        return;
+      }
       case "DISCONNECT": {
         Connection connection = CONNECTIONS.remove(params.getOrDefault("connId", ""));
         if (connection != null) connection.close();
@@ -159,6 +175,9 @@ public final class NetcattyJdbcSidecar {
         properties.setProperty(key.substring(5), entry.getValue());
       }
     }
+    // Unreachable hosts otherwise block the (single threaded) sidecar for as
+    // long as the driver's own default, which can be minutes.
+    DriverManager.setLoginTimeout(Math.max(1, parseInt(params.get("loginTimeoutSec"), 20)));
     Connection connection = DriverManager.getConnection(url, properties);
     connection.setAutoCommit(true);
     Connection previous = CONNECTIONS.put(connId, connection);
@@ -178,6 +197,7 @@ public final class NetcattyJdbcSidecar {
     String sql = params.getOrDefault("sql", "");
     int maxRows = parseInt(params.get("maxRows"), 1000);
     try (Statement statement = connection.createStatement()) {
+      applyQueryTimeout(statement, params);
       // Do not call setMaxRows: several drivers implement it by rewriting the
       // statement (trailing LIMIT), which breaks dialects that have no LIMIT.
       // The row cap is enforced while streaming instead.
@@ -221,6 +241,20 @@ public final class NetcattyJdbcSidecar {
         tail.put("truncated", truncated ? "true" : "false");
         ok(id, tail);
       }
+    }
+  }
+
+  /**
+   * Driver-side statement timeout: the driver cancels the statement itself and
+   * the session survives, instead of Netcatty having to kill the JVM.
+   */
+  private static void applyQueryTimeout(Statement statement, Map<String, String> params) {
+    int seconds = parseInt(params.get("timeoutSec"), 0);
+    if (seconds <= 0) return;
+    try {
+      statement.setQueryTimeout(seconds);
+    } catch (Exception ignored) {
+      // Optional feature; the Node side still enforces its own deadline.
     }
   }
 
@@ -291,6 +325,7 @@ public final class NetcattyJdbcSidecar {
   private static void update(String id, Map<String, String> params) throws Exception {
     Connection connection = connection(params);
     try (Statement statement = connection.createStatement()) {
+      applyQueryTimeout(statement, params);
       boolean hasResult = statement.execute(params.getOrDefault("sql", ""));
       Map<String, String> result = new HashMap<>();
       if (hasResult) {

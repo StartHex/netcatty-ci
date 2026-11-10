@@ -317,3 +317,157 @@ test("commandFromSql: labels statements the drivers do not label", () => {
   assert.equal(commandFromSql("with x as (select 1) select * from x"), "SELECT");
   assert.equal(commandFromSql(""), "OK");
 });
+
+test("test connection uses a throwaway session and leaves the live one alone", async () => {
+  const target = { id: "sqlite-isolated-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    assert.equal((await handlers.connect(target)).ok, true);
+    assert.equal((await handlers.query({ target, sql: "create table kept (id integer)" })).ok, true);
+    const live = __test.sessions.get(target.id);
+
+    const tested = await handlers.test(target);
+    assert.equal(tested.ok, true, JSON.stringify(tested));
+
+    // Same in-memory database: the test neither replaced nor closed it.
+    assert.equal(__test.sessions.get(target.id), live);
+    const selected = await handlers.query({ target, sql: "select count(*) as n from kept" });
+    assert.equal(selected.ok, true, JSON.stringify(selected));
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("edited connection settings replace the cached session", async () => {
+  const target = { id: "sqlite-fingerprint-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    assert.equal((await handlers.query({ target, sql: "create table old_db (id integer)" })).ok, true);
+    const first = __test.sessions.get(target.id);
+    const edited = { ...target, initSql: "select 1" };
+    const result = await handlers.query({ target: edited, sql: "select * from old_db" });
+    assert.equal(result.ok, false, "the edited target must not reuse the old in-memory database");
+    assert.notEqual(__test.sessions.get(target.id), first);
+    assert.equal(first.closed, true);
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("connectionFingerprint changes with the password but not with object identity", () => {
+  const base = { id: "c", kind: "postgresql", host: "db", port: 5432, username: "u", password: "s3cr3t-pass" };
+  assert.equal(__test.connectionFingerprint(base), __test.connectionFingerprint({ ...base }));
+  assert.notEqual(
+    __test.connectionFingerprint(base),
+    __test.connectionFingerprint({ ...base, password: "other-pass" }),
+  );
+  assert.match(__test.connectionFingerprint(base), /^[0-9a-f]{64}$/, "hashed, not the raw password");
+});
+
+test("typed BEGIN / COMMIT keep the transaction state in sync", async () => {
+  const target = { id: "sqlite-typed-tx-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    await handlers.query({ target, sql: "create table t (n integer)" });
+    const begun = await handlers.query({ target, sql: "BEGIN" });
+    assert.equal(begun.ok, true, JSON.stringify(begun));
+    assert.equal(begun.transactionOpen, true);
+    const inside = await handlers.query({ target, sql: "insert into t values (1)" });
+    assert.equal(inside.transactionOpen, true);
+    const committed = await handlers.query({ target, sql: "COMMIT" });
+    assert.equal(committed.transactionOpen, false);
+    const controlled = await handlers.control({ target, action: "begin" });
+    assert.equal(controlled.transactionOpen, true);
+    const rolledBack = await handlers.control({ target, action: "rollback" });
+    assert.equal(rolledBack.transactionOpen, false);
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("a reconnect under an open transaction is reported instead of auto-committing", async () => {
+  const target = { id: "sqlite-lost-tx-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    assert.equal((await handlers.control({ target, action: "begin" })).ok, true);
+    const entry = __test.sessions.get(target.id);
+    // Simulate a dropped connection: the driver now reports a new generation.
+    entry.session.generation = () => 99;
+    const result = await handlers.query({ target, sql: "select 1" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "transaction-lost");
+    assert.equal(result.transactionOpen, false);
+    // Reported once; the next statement runs normally on the new connection.
+    const next = await handlers.query({ target, sql: "select 1" });
+    assert.equal(next.ok, true, JSON.stringify(next));
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("cancel stops the running statement and reports query-cancelled", async () => {
+  const target = { id: "sqlite-cancel-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    const entry = __test.getSession(target);
+    let rejectRunning;
+    let cancelCalls = 0;
+    entry.session = {
+      ...entry.session,
+      query: () => new Promise((_resolve, reject) => {
+        rejectRunning = reject;
+      }),
+      cancel: async () => {
+        cancelCalls += 1;
+        rejectRunning?.(new Error("canceling statement due to user request"));
+      },
+    };
+    const pending = handlers.query({ target, sql: "select pg_sleep(60)" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const cancelled = await handlers.cancel({ id: target.id });
+    assert.deepEqual(cancelled, { ok: true, cancelled: true });
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "query-cancelled");
+    assert.equal(cancelCalls, 1);
+    assert.equal(entry.closed, false, "a cancel that settles keeps the session");
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("a timed out statement asks the driver to cancel and keeps a session that settles", async () => {
+  const target = { id: "sqlite-timeout-test", kind: "sqlite", sqlitePath: ":memory:" };
+  try {
+    const entry = __test.getSession(target);
+    let rejectRunning;
+    entry.session = {
+      ...entry.session,
+      query: () => new Promise((_resolve, reject) => {
+        rejectRunning = reject;
+      }),
+      cancel: async () => rejectRunning?.(new Error("statement timeout")),
+    };
+    const result = await handlers.query({ target, sql: "select slow()", timeoutMs: 50 });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "query-timeout");
+    assert.equal(entry.closed, false);
+  } finally {
+    await handlers.disconnect({ id: target.id });
+  }
+});
+
+test("transactionEffectOf follows dialect rules", () => {
+  const effect = __test.transactionEffectOf;
+  assert.equal(effect("postgresql", "BEGIN"), "begin");
+  assert.equal(effect("postgresql", "begin isolation level serializable;"), "begin");
+  assert.equal(effect("mysql", "START TRANSACTION"), "begin");
+  assert.equal(effect("postgresql", "-- note\nCOMMIT"), "commit");
+  assert.equal(effect("postgresql", "ROLLBACK TO SAVEPOINT s1"), null);
+  assert.equal(effect("oracle", "BEGIN dbms_output.put_line('x'); END;"), null);
+  assert.equal(effect("oracle", "ROLLBACK"), "rollback");
+  assert.equal(effect("sqlserver", "BEGIN TRAN"), null);
+  assert.equal(effect("postgresql", "select 1"), null);
+});
+
+test("settleWithin and resolvesWithin never reject", async () => {
+  assert.equal(await __test.settleWithin(Promise.reject(new Error("x")), 50), true);
+  assert.equal(await __test.resolvesWithin(Promise.reject(new Error("x")), 50), false);
+  assert.equal(await __test.resolvesWithin(Promise.resolve(1), 50), true);
+  assert.equal(await __test.settleWithin(new Promise(() => {}), 20), false);
+});

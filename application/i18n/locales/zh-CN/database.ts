@@ -241,4 +241,11 @@ export const zhCNDatabaseMessages: Messages = {
   'databases.ai.schemaHint': '会把左侧表结构里的表名作为上下文。',
   'databases.ai.noSchemaHint': '刷新左侧表结构可把表名作为上下文。',
   'databases.ai.emptyResponse': '模型返回了空回答。',
+  'databases.testingElapsed': '正在测试连接… {seconds} 秒',
+  'databases.workbench.runningElapsed': '已运行 {seconds} 秒',
+  'databases.workbench.transactionActive': '事务进行中',
+  'databases.workbench.queryCancelled': '查询已取消。',
+  'databases.workbench.queryTimeout': '语句执行超时，已取消。',
+  'databases.workbench.transactionLost': '连接已断开，服务器已回滚未提交的事务。请重新开始事务后再执行语句。',
+  'databases.workbench.connectTimeout': '连接数据库超时。',
 };

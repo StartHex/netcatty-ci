@@ -43,6 +43,7 @@ import {
   type DatabaseTunnelDeps,
 } from '../../infrastructure/services/databaseTunnelService';
 import type { DbConnectionTarget, DbTestConnectionResult } from '../../domain/models';
+import { useI18n } from '../i18n/I18nProvider';
 import { databaseTabStore, useDatabaseTabRequest } from './databaseTabStore';
 
 export type { DatabaseTunnelDeps } from '../../infrastructure/services/databaseTunnelService';
@@ -91,6 +92,10 @@ export interface DatabaseTab {
   resultSets?: DatabaseResultSet[];
   /** Index into `resultSets` whose result is currently displayed. */
   activeResultIndex?: number;
+  /** Epoch ms when the current run started; drives the elapsed timer. */
+  runStartedAt?: number;
+  /** BEGIN / COMMIT / ROLLBACK in flight. */
+  transactionBusy?: boolean;
 }
 
 /** One statement's outcome within a multi-statement run. */
@@ -154,13 +159,59 @@ export function useDatabaseConnectionTester(
   return { test };
 }
 
+/** Bridge error codes that deserve a translated message instead of the driver text. */
+const DB_ERROR_MESSAGE_KEYS: Record<string, string> = {
+  'query-cancelled': 'databases.workbench.queryCancelled',
+  'query-timeout': 'databases.workbench.queryTimeout',
+  'transaction-lost': 'databases.workbench.transactionLost',
+  'connect-timeout': 'databases.workbench.connectTimeout',
+};
+
+export function describeDatabaseError(
+  error: DbBridgeError | undefined | null,
+  t: (key: string) => string,
+): string {
+  const key = error?.code ? DB_ERROR_MESSAGE_KEYS[error.code] : undefined;
+  if (key) {
+    const translated = t(key);
+    if (translated && translated !== key) return translated;
+  }
+  return formatDatabaseError(error);
+}
+
 export function useDatabaseWorkbench(
   connections: DatabaseConnection[],
   tunnelDeps?: DatabaseTunnelDeps,
 ): UseDatabaseWorkbenchResult {
+  const { t } = useI18n();
   const [tabs, setTabs] = useState<DatabaseTab[]>([]);
   const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
   const tabsRef = useRef<DatabaseTab[]>(tabs);
+  /**
+   * Per-tab run token. Cancel and every new run bump it, so a statement that
+   * comes back after the user moved on is dropped instead of overwriting the
+   * newer state (or re-enabling "running" for the wrong run).
+   */
+  const runTokensRef = useRef(new Map<string, number>());
+  /** Synchronous double-run guard (state updates land a render later). */
+  const runningRef = useRef(new Set<string>());
+  const structureTokensRef = useRef(new Map<string, number>());
+  const tRef = useRef(t);
+  tRef.current = t;
+
+  const beginRun = useCallback((tabId: string): number => {
+    const token = (runTokensRef.current.get(tabId) ?? 0) + 1;
+    runTokensRef.current.set(tabId, token);
+    return token;
+  }, []);
+  const isCurrentRun = useCallback(
+    (tabId: string, token: number): boolean => runTokensRef.current.get(tabId) === token,
+    [],
+  );
+  const describeError = useCallback(
+    (error: DbBridgeError | undefined | null) => describeDatabaseError(error, tRef.current),
+    [],
+  );
 
   const lastActivityRef = useRef(new Map<string, number>());
   const probingRef = useRef(new Set<string>());
@@ -222,23 +273,31 @@ export function useDatabaseWorkbench(
   const loadTables = useCallback(
     async (tabId: string, connection: DatabaseConnection) => {
       patchTab(tabId, { tablesLoading: true, tablesError: undefined });
-      const tabEncoding = tabsRef.current.find((entry) => entry.id === tabId)?.clientEncoding;
-      const resolved = await resolveTarget(connection, tabEncoding);
-      if (resolved.ok !== true) {
-        patchTab(tabId, { tablesLoading: false, tablesError: resolved.error });
-        return;
-      }
-      const response = await listDatabaseTables(resolved.target);
-      if (response.ok === true) {
-        patchTab(tabId, { tablesLoading: false, tables: response.tables });
-      } else {
+      try {
+        const tabEncoding = tabsRef.current.find((entry) => entry.id === tabId)?.clientEncoding;
+        const resolved = await resolveTarget(connection, tabEncoding);
+        if (resolved.ok !== true) {
+          patchTab(tabId, { tablesLoading: false, tablesError: resolved.error });
+          return;
+        }
+        const response = await listDatabaseTables(resolved.target);
+        if (response.ok === true) {
+          patchTab(tabId, { tablesLoading: false, tables: response.tables });
+        } else {
+          patchTab(tabId, {
+            tablesLoading: false,
+            tablesError: describeError(response.error),
+          });
+        }
+      } catch (error) {
+        // A thrown tunnel/IPC error must not leave the schema spinner running.
         patchTab(tabId, {
           tablesLoading: false,
-          tablesError: formatDatabaseError(response.error),
+          tablesError: error instanceof Error ? error.message : String(error),
         });
       }
     },
-    [patchTab, resolveTarget],
+    [describeError, patchTab, resolveTarget],
   );
 
   const refreshTables = useCallback(
@@ -267,38 +326,65 @@ export function useDatabaseWorkbench(
       if (!activeTab) return;
       const connection = connectionsRef.current.find((entry) => entry.id === activeTab.connectionId);
       if (!connection) return;
+      if (activeTab.running || runningRef.current.has(tabId)) return;
       // Run through the same path as the toolbar button.
-      const resolved = await resolveTarget(connection, activeTab.clientEncoding);
-      if (resolved.ok !== true) {
-        patchTab(tabId, { error: resolved.error });
-        return;
-      }
+      const token = beginRun(tabId);
+      runningRef.current.add(tabId);
+      const startedAt = Date.now();
       patchTab(tabId, {
         running: true,
+        runStartedAt: startedAt,
         structure: undefined,
         error: undefined,
         errorDetail: undefined,
       });
-      const startedAt = Date.now();
-      const response = await runDatabaseQuery(resolved.target, sql);
-      if (response.ok === true && response.result) {
+      try {
+        const resolved = await resolveTarget(connection, activeTab.clientEncoding);
+        if (!isCurrentRun(tabId, token)) return;
+        if (resolved.ok !== true) {
+          patchTab(tabId, { running: false, runStartedAt: undefined, error: resolved.error });
+          return;
+        }
+        const response = await runDatabaseQuery(resolved.target, sql);
+        if (!isCurrentRun(tabId, token)) return;
+        const transaction = typeof response.transactionOpen === 'boolean'
+          ? { transactionOpen: response.transactionOpen }
+          : {};
+        if (response.ok === true && response.result) {
+          patchTab(tabId, {
+            running: false,
+            runStartedAt: undefined,
+            result: response.result,
+            resultSets: undefined,
+            activeResultIndex: undefined,
+            editMeta: null,
+            durationMs: Date.now() - startedAt,
+            error: undefined,
+            errorDetail: undefined,
+            ...transaction,
+          });
+        } else {
+          const failureInfo = (response as { error?: DbBridgeError }).error;
+          patchTab(tabId, {
+            running: false,
+            runStartedAt: undefined,
+            error: describeError(failureInfo),
+            errorDetail: failureInfo,
+            ...transaction,
+          });
+        }
+      } catch (error) {
+        if (!isCurrentRun(tabId, token)) return;
         patchTab(tabId, {
           running: false,
-          result: response.result,
-          durationMs: Date.now() - startedAt,
-          error: undefined,
-          errorDetail: undefined,
+          runStartedAt: undefined,
+          error: error instanceof Error ? error.message : String(error),
         });
-      } else {
-        const failureInfo = (response as { error?: DbBridgeError }).error;
-        patchTab(tabId, {
-          running: false,
-          error: formatDatabaseError(failureInfo),
-          errorDetail: failureInfo,
-        });
+      } finally {
+        if (isCurrentRun(tabId, token)) runningRef.current.delete(tabId);
       }
     },
-    [patchTab, resolveTarget],
+    [beginRun, describeError, isCurrentRun, patchTab, resolveTarget],
   );
 
   const showStructure = useCallback(
@@ -308,25 +394,39 @@ export function useDatabaseWorkbench(
       const connection = connectionsRef.current.find((entry) => entry.id === activeTab.connectionId);
       if (!connection) return;
       patchTab(tabId, { structure: { table, columns: [], loading: true } });
-      const resolved = await resolveTarget(connection, activeTab.clientEncoding);
-      if (resolved.ok !== true) {
-        patchTab(tabId, { structure: { table, columns: [], error: resolved.error } });
-        return;
-      }
-      const response = await listDatabaseColumns(resolved.target, table.name, table.schema);
-      if (response.ok === true) {
-        patchTab(tabId, { structure: { table, columns: response.columns } });
-      } else {
+      // Only the latest structure request may write its result.
+      const token = (structureTokensRef.current.get(tabId) ?? 0) + 1;
+      structureTokensRef.current.set(tabId, token);
+      const isLatest = () => structureTokensRef.current.get(tabId) === token;
+      try {
+        const resolved = await resolveTarget(connection, activeTab.clientEncoding);
+        if (!isLatest()) return;
+        if (resolved.ok !== true) {
+          patchTab(tabId, { structure: { table, columns: [], error: resolved.error } });
+          return;
+        }
+        const response = await listDatabaseColumns(resolved.target, table.name, table.schema);
+        if (!isLatest()) return;
+        if (response.ok === true) {
+          patchTab(tabId, { structure: { table, columns: response.columns } });
+        } else {
+          patchTab(tabId, {
+            structure: { table, columns: [], error: describeError(response.error) },
+          });
+        }
+      } catch (error) {
+        if (!isLatest()) return;
         patchTab(tabId, {
-          structure: { table, columns: [], error: formatDatabaseError(response.error) },
+          structure: { table, columns: [], error: error instanceof Error ? error.message : String(error) },
         });
       }
     },
-    [patchTab, resolveTarget],
+    [describeError, patchTab, resolveTarget],
   );
 
   const clearStructure = useCallback(
     (tabId: string) => {
+      structureTokensRef.current.set(tabId, (structureTokensRef.current.get(tabId) ?? 0) + 1);
       patchTab(tabId, { structure: undefined });
     },
     [patchTab],
@@ -408,6 +508,9 @@ export function useDatabaseWorkbench(
 
   const closeTab = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((entry) => entry.id === tabId);
+    runTokensRef.current.delete(tabId);
+    runningRef.current.delete(tabId);
+    structureTokensRef.current.delete(tabId);
     setTabs((prev) => {
       const next = prev.filter((entry) => entry.id !== tabId);
       setActiveTabIdState((current) => {
@@ -416,10 +519,19 @@ export function useDatabaseWorkbench(
       });
       return next;
     });
-    if (tab) {
-      void closeDatabaseConnection(tab.connectionId);
-      void closeDatabaseTunnel(tab.connectionId);
+    if (!tab) return;
+    // Tabs opened with "new tab" share one pooled session (and tunnel) per
+    // connection: closing one of them must not kill the others' session or
+    // their open transaction.
+    const stillUsed = tabsRef.current.some(
+      (entry) => entry.id !== tabId && entry.connectionId === tab.connectionId,
+    );
+    if (stillUsed) {
+      if (tab.running) void cancelDatabaseQuery(tab.connectionId);
+      return;
     }
+    void closeDatabaseConnection(tab.connectionId);
+    void closeDatabaseTunnel(tab.connectionId);
   }, []);
 
   const updateSql = useCallback(
@@ -463,21 +575,30 @@ export function useDatabaseWorkbench(
       if (!connection || connection.readOnly) return false;
       const sql = build(tab);
       if (!sql) return false;
-      const resolved = await resolveTarget(connection, tab.clientEncoding);
-      if (resolved.ok !== true) {
-        patchTab(tabId, { error: resolved.error });
+      touchActivity(tab.connectionId);
+      try {
+        const resolved = await resolveTarget(connection, tab.clientEncoding);
+        if (resolved.ok !== true) {
+          patchTab(tabId, { error: resolved.error });
+          return false;
+        }
+        const response = await runDatabaseQuery(resolved.target, sql, { maxRows: 1 });
+        const transaction = typeof response.transactionOpen === 'boolean'
+          ? { transactionOpen: response.transactionOpen }
+          : {};
+        if (response.ok !== true) {
+          const bridgeError = response.error;
+          patchTab(tabId, { error: describeError(bridgeError), errorDetail: bridgeError, ...transaction });
+          return false;
+        }
+        patchTab(tabId, { error: undefined, errorDetail: undefined, ...transaction });
+        return true;
+      } catch (error) {
+        patchTab(tabId, { error: error instanceof Error ? error.message : String(error) });
         return false;
       }
-      const response = await runDatabaseQuery(resolved.target, sql, { maxRows: 1 });
-      if (response.ok !== true) {
-        const bridgeError = response.error;
-        patchTab(tabId, { error: formatDatabaseError(bridgeError), errorDetail: bridgeError });
-        return false;
-      }
-      patchTab(tabId, { error: undefined, errorDetail: undefined });
-      return true;
     },
-    [patchTab, resolveTarget],
+    [describeError, patchTab, resolveTarget, touchActivity],
   );
 
   const updateCell = useCallback(
@@ -583,6 +704,10 @@ export function useDatabaseWorkbench(
       const now = Date.now();
       for (const tab of tabsRef.current) {
         if (tab.running || probingRef.current.has(tab.connectionId)) continue;
+        // A probe would dial a tab the user never connected, and inside an
+        // aborted PostgreSQL transaction "select 1" fails although the
+        // session is alive; the next real statement reports either case.
+        if (!tab.connected || tab.transactionOpen) continue;
         const last = lastActivityRef.current.get(tab.connectionId) ?? now;
         if (now - last < CONNECTION_IDLE_PROBE_MS) continue;
         const connection = connectionsRef.current.find((entry) => entry.id === tab.connectionId);
@@ -618,7 +743,7 @@ export function useDatabaseWorkbench(
       options?: { maxRows?: number; clientEncoding?: string },
     ) => {
       const tab = tabsRef.current.find((entry) => entry.id === tabId);
-      if (!tab || tab.running) return;
+      if (!tab || tab.running || runningRef.current.has(tabId)) return;
       touchActivity(tab.connectionId);
       if (tab.offline) patchTab(tabId, { offline: false });
       const sql = (sqlOverride ?? tab.sql).trim();
@@ -630,8 +755,12 @@ export function useDatabaseWorkbench(
       }
       const statements = splitSqlStatements(sql);
       if (statements.length === 0) return;
+      const token = beginRun(tabId);
+      runningRef.current.add(tabId);
+      const startedAt = Date.now();
       patchTab(tabId, {
         running: true,
+        runStartedAt: startedAt,
         structure: undefined,
         error: undefined,
         errorDetail: undefined,
@@ -639,13 +768,21 @@ export function useDatabaseWorkbench(
         activeResultIndex: undefined,
         executingStatement: null,
       });
-      const startedAt = Date.now();
       const runEncoding = options?.clientEncoding
         ?? tabsRef.current.find((entry) => entry.id === tabId)?.clientEncoding;
+      // The bridge reports the session's transaction state with every answer.
+      const transactionPatch = (response: { transactionOpen?: boolean }) =>
+        typeof response.transactionOpen === 'boolean' ? { transactionOpen: response.transactionOpen } : {};
       try {
         const resolved = await resolveTarget(connection, runEncoding);
+        if (!isCurrentRun(tabId, token)) return;
         if (resolved.ok !== true) {
-          patchTab(tabId, { running: false, executingStatement: null, error: resolved.error });
+          patchTab(tabId, {
+            running: false,
+            runStartedAt: undefined,
+            executingStatement: null,
+            error: resolved.error,
+          });
           return;
         }
         // Statements without their own LIMIT load a full page set so the grid
@@ -663,9 +800,11 @@ export function useDatabaseWorkbench(
             },
           });
           const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows });
+          if (!isCurrentRun(tabId, token)) return;
           if (response.ok === true && response.result) {
             patchTab(tabId, {
               running: false,
+              runStartedAt: undefined,
               executingStatement: null,
               status: 'ready',
               connected: true,
@@ -674,6 +813,7 @@ export function useDatabaseWorkbench(
               error: undefined,
               errorDetail: undefined,
               editMeta: null,
+              ...transactionPatch(response),
             });
             const editableTable = parseSingleTableQuery(statement.sql);
             if (editableTable && response.result.columns.length > 0) {
@@ -683,9 +823,11 @@ export function useDatabaseWorkbench(
             const bridgeError = response.ok === false ? response.error : undefined;
             patchTab(tabId, {
               running: false,
+              runStartedAt: undefined,
               executingStatement: null,
-              error: formatDatabaseError(bridgeError),
+              error: describeError(bridgeError),
               errorDetail: bridgeError,
+              ...transactionPatch(response),
             });
           }
           return;
@@ -698,7 +840,10 @@ export function useDatabaseWorkbench(
         // about than a cascade of follow-up errors.
         const resultSets: DatabaseResultSet[] = [];
         let stopReason: string | undefined;
+        let transactionState: { transactionOpen?: boolean } = {};
         for (const statement of statements) {
+          // Cancel / close stop the script between statements, not just the current one.
+          if (!isCurrentRun(tabId, token)) return;
           const statementStartedAt = Date.now();
           patchTab(tabId, {
             executingStatement: {
@@ -709,6 +854,8 @@ export function useDatabaseWorkbench(
             },
           });
           const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows });
+          if (!isCurrentRun(tabId, token)) return;
+          transactionState = { ...transactionState, ...transactionPatch(response) };
           if (response.ok === true && response.result) {
             resultSets.push({
               sql: statement.sql,
@@ -724,27 +871,31 @@ export function useDatabaseWorkbench(
             sql: statement.sql,
             index: resultSets.length + 1,
             startLine: statement.startLine,
-            error: formatDatabaseError(bridgeError),
+            error: describeError(bridgeError),
             errorDetail: bridgeError,
             durationMs: Date.now() - statementStartedAt,
           });
-          stopReason = formatDatabaseError(bridgeError);
+          stopReason = describeError(bridgeError);
           break;
         }
-        patchTab(tabId, { running: false, executingStatement: null });
+        patchTab(tabId, { running: false, runStartedAt: undefined, executingStatement: null, ...transactionState });
         showResultSet(tabId, resultSets, 0);
         if (stopReason) {
           patchTab(tabId, { error: stopReason, errorDetail: resultSets[resultSets.length - 1]?.errorDetail });
         }
       } catch (error) {
+        if (!isCurrentRun(tabId, token)) return;
         patchTab(tabId, {
           running: false,
+          runStartedAt: undefined,
           executingStatement: null,
           error: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        if (isCurrentRun(tabId, token)) runningRef.current.delete(tabId);
       }
     },
-    [patchTab, resolveEditMeta, resolveTarget, showResultSet, touchActivity],
+    [beginRun, describeError, isCurrentRun, patchTab, resolveEditMeta, resolveTarget, showResultSet, touchActivity],
   );
 
   const setActiveResultIndex = useCallback(
@@ -756,30 +907,47 @@ export function useDatabaseWorkbench(
     [showResultSet],
   );
 
+  const transactionBusyRef = useRef(new Set<string>());
+
   const controlTransaction = useCallback(
     async (tabId: string, action: 'begin' | 'commit' | 'rollback') => {
       const tab = tabsRef.current.find((entry) => entry.id === tabId);
-      if (!tab) return;
+      if (!tab || transactionBusyRef.current.has(tabId)) return;
       touchActivity(tab.connectionId);
       const connection = connectionsRef.current.find((entry) => entry.id === tab.connectionId);
       if (!connection) return;
-      const resolved = await resolveTarget(connection, tab.clientEncoding);
-      if (resolved.ok !== true) {
-        patchTab(tabId, { error: resolved.error });
-        return;
+      transactionBusyRef.current.add(tabId);
+      patchTab(tabId, { transactionBusy: true });
+      try {
+        const resolved = await resolveTarget(connection, tab.clientEncoding);
+        if (resolved.ok !== true) {
+          patchTab(tabId, { error: resolved.error });
+          return;
+        }
+        const response = await controlDatabaseTransaction(resolved.target, action);
+        if (response.ok !== true) {
+          patchTab(tabId, {
+            error: describeError(response.error),
+            errorDetail: response.error,
+            ...(typeof response.transactionOpen === 'boolean' ? { transactionOpen: response.transactionOpen } : {}),
+          });
+          return;
+        }
+        patchTab(tabId, {
+          transactionOpen: typeof response.transactionOpen === 'boolean'
+            ? response.transactionOpen
+            : action === 'begin',
+          error: undefined,
+          errorDetail: undefined,
+        });
+      } catch (error) {
+        patchTab(tabId, { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        transactionBusyRef.current.delete(tabId);
+        patchTab(tabId, { transactionBusy: false });
       }
-      const response = await controlDatabaseTransaction(resolved.target, action);
-      if (response.ok !== true) {
-        patchTab(tabId, { error: formatDatabaseError(response.error), errorDetail: response.error });
-        return;
-      }
-      patchTab(tabId, {
-        transactionOpen: action === 'begin' ? true : false,
-        error: undefined,
-        errorDetail: undefined,
-      });
     },
-    [patchTab, resolveTarget, touchActivity],
+    [describeError, patchTab, resolveTarget, touchActivity],
   );
 
   const beginTransaction = useCallback(
@@ -815,6 +983,8 @@ export function useDatabaseWorkbench(
         editMeta: null,
         error: undefined,
         errorDetail: undefined,
+        // The session is dropped below, and an open transaction with it.
+        transactionOpen: false,
       });
       if (connection) {
         await closeDatabaseConnection(connection.id).catch(() => undefined);
@@ -828,10 +998,19 @@ export function useDatabaseWorkbench(
   const cancelQuery = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((entry) => entry.id === tabId);
     if (!tab) return;
-    void cancelDatabaseQuery(tab.connectionId).finally(() => {
-      patchTab(tabId, { running: false, error: 'Query cancelled' });
+    // Invalidate the run first: whatever the statement returns now is stale,
+    // and a multi-statement script must not start its next statement.
+    beginRun(tabId);
+    runningRef.current.delete(tabId);
+    patchTab(tabId, {
+      running: false,
+      runStartedAt: undefined,
+      executingStatement: null,
+      error: tRef.current('databases.workbench.queryCancelled'),
+      errorDetail: undefined,
     });
-  }, [patchTab]);
+    void cancelDatabaseQuery(tab.connectionId);
+  }, [beginRun, patchTab]);
 
   const reconnect = useCallback(
     async (tabId: string) => {
@@ -839,9 +1018,23 @@ export function useDatabaseWorkbench(
       if (!tab) return;
       const connection = connectionsRef.current.find((entry) => entry.id === tab.connectionId);
       if (!connection) return;
+      // Reconnect means a fresh session (and tunnel): the old one is the
+      // reason the user is here, and its transaction is gone either way.
+      beginRun(tabId);
+      runningRef.current.delete(tabId);
+      patchTab(tabId, {
+        running: false,
+        runStartedAt: undefined,
+        executingStatement: null,
+        transactionOpen: false,
+        offline: false,
+      });
+      await closeDatabaseConnection(connection.id);
+      if (connection.sshHostId) await closeDatabaseTunnel(connection.id);
+      touchActivity(connection.id);
       await connectTab(tabId, connection);
     },
-    [connectTab],
+    [beginRun, connectTab, patchTab, touchActivity],
   );
 
   // Hydrate persisted tabs once connections are available. Restored tabs stay
