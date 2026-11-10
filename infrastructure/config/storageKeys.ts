@@ -77,6 +77,8 @@ export const STORAGE_KEY_HTTP_TABS = 'netcatty_http_tabs_v1';
 export const STORAGE_KEY_HTTP_HISTORY = 'netcatty_http_history_v1';
 /** Curl tool, device-local: collapsed folder paths in the collection tree. */
 export const STORAGE_KEY_CURL_FOLDER_UI = 'netcatty_curl_folder_ui_v1';
+/** Curl tool, device-local: where the response pane sits ('bottom' | 'right'). */
+export const STORAGE_KEY_CURL_RESPONSE_LAYOUT = 'netcatty_curl_response_layout_v1';
 /** User-registered JDBC driver jars. */
 export const STORAGE_KEY_JDBC_DRIVERS = 'netcatty_jdbc_drivers_v1';
 export const STORAGE_KEY_VAULT_HOSTS_VIEW_MODE = 'netcatty_vault_hosts_view_mode_v1';

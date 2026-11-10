@@ -8,6 +8,7 @@ import {
   curlFolderJoin,
   curlFolderLeafName,
   curlFolderParentPath,
+  duplicateCurlRequest,
   removeCurlFolderSubtree,
   reparentCurlFolderPath,
   rewriteCurlFolderPath,
@@ -129,4 +130,29 @@ test("rewriteCurlRequestFolders rewrites members and preserves untouched request
   assert.equal(next[1]?.folder, "new");
   assert.equal(next[2]?.folder, "new/b");
   assert.equal(next[3], untouched);
+});
+
+test("duplicateCurlRequest inserts an independent copy right after the source", () => {
+  const source = { ...request("a", "team/api"), name: "Login", lastUsedAt: 5 };
+  source.headers.push({ id: "h1", key: "X-Token", value: "1", enabled: true });
+  const list = [request("first"), source, request("last")];
+  const next = duplicateCurlRequest(list, "a", { id: "copy-1", copyLabel: "copy", now: 42 });
+
+  assert.deepEqual(next.map((entry) => entry.id), ["first", "a", "copy-1", "last"]);
+  const copy = next[2];
+  assert.equal(copy.name, "Login copy");
+  assert.equal(copy.folder, "team/api");
+  assert.equal(copy.createdAt, 42);
+  assert.equal(copy.updatedAt, 42);
+  assert.equal(copy.lastUsedAt, undefined);
+  assert.deepEqual(copy.headers, source.headers);
+  assert.notEqual(copy.headers, source.headers, "deep copy: editing one must not edit the other");
+  assert.equal(next[1], source);
+});
+
+test("duplicateCurlRequest numbers the name when it is taken and ignores unknown ids", () => {
+  const list = [{ ...request("a"), name: "Login" }, { ...request("b"), name: "Login copy" }];
+  const next = duplicateCurlRequest(list, "a", { id: "c", copyLabel: "copy" });
+  assert.equal(next[1].name, "Login copy 2");
+  assert.equal(duplicateCurlRequest(list, "missing", { id: "x", copyLabel: "copy" }), list);
 });

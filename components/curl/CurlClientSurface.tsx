@@ -1,8 +1,9 @@
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock, Copy, History, Loader2, Play, Plus, Save, Square, Wand2, X } from 'lucide-react';
+import { Clock, Copy, History, Loader2, PanelBottom, PanelRight, Play, Plus, Save, Square, Wand2, X } from 'lucide-react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useHttpClient, type CurlTab } from '../../application/state/useHttpClient';
+import { useCurlResponseLayout } from '../../application/state/useCurlResponseLayout';
 import type { CurlResponse } from '../../domain/models';
 import type { HttpWireWarning } from '../../domain/http/httpWire';
 import { useClipboardBackend } from '../../application/state/useClipboardBackend';
@@ -548,6 +549,7 @@ export const CurlClientSurface: React.FC<{
   const client = useHttpClient({ requests, onUpdateRequests });
   const { writeClipboardText } = useClipboardBackend();
   const [section, setSection] = useState<RequestSection>('params');
+  const [responseLayout, setResponseLayout] = useCurlResponseLayout();
   const [bodyView, setBodyView] = useState<'text' | 'tree'>('text');
   const [historyEntry, setHistoryEntry] = useState<HttpHistoryEntry | null>(null);
   const activeTab = useMemo(
@@ -754,7 +756,11 @@ export const CurlClientSurface: React.FC<{
 
       <VerticalSplit
         className="flex-1"
-        storageKey="netcatty.curl.splitRatio"
+        // Each orientation remembers its own ratio; the key also remounts the
+        // split so the stored ratio of the new orientation is read.
+        key={responseLayout}
+        orientation={responseLayout === 'right' ? 'horizontal' : 'vertical'}
+        storageKey={responseLayout === 'right' ? 'netcatty.curl.splitRatio.horizontal' : 'netcatty.curl.splitRatio'}
         handleLabel={t('curl.split.resize')}
         testId="curl-split"
         top={
@@ -773,6 +779,16 @@ export const CurlClientSurface: React.FC<{
                 {t(`curl.request.${item}`)}
               </button>
             ))}
+            <button
+              type="button"
+              className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              data-testid="curl-response-layout-toggle"
+              aria-label={t(responseLayout === 'right' ? 'curl.layout.responseBottom' : 'curl.layout.responseRight')}
+              title={t(responseLayout === 'right' ? 'curl.layout.responseBottom' : 'curl.layout.responseRight')}
+              onClick={() => setResponseLayout(responseLayout === 'right' ? 'bottom' : 'right')}
+            >
+              {responseLayout === 'right' ? <PanelBottom size={14} /> : <PanelRight size={14} />}
+            </button>
           </div>
           {section === 'body' ? null : (
           <ScrollArea className="min-h-0 flex-1">
@@ -980,7 +996,9 @@ export const CurlClientSurface: React.FC<{
           </ScrollArea>
           )}
           {section === 'body' ? (
-                <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+                // Scrolls on its own: the editor keeps a 200px minimum, so a
+                // short pane must scroll instead of spilling over the response.
+                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <Select
                       value={tab.draft.body.kind}

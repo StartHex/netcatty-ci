@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { FolderPlus, Plus, Trash2, Waypoints } from 'lucide-react';
+import { Copy, FolderPlus, Plus, Trash2, Waypoints } from 'lucide-react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { curlTabStore } from '../../application/state/curlTabStore';
@@ -9,6 +9,7 @@ import {
   curlFolderIsWithin,
   curlFolderJoin,
   curlFolderParentPath,
+  duplicateCurlRequest,
   removeCurlFolderSubtree,
   reparentCurlFolderPath,
   rewriteCurlFolders,
@@ -137,6 +138,17 @@ export const CurlCollections: React.FC<{
     );
   };
 
+  const duplicateRequest = (request: CurlRequest) => {
+    const id = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const next = duplicateCurlRequest(requests ?? [], request.id, {
+      id,
+      copyLabel: t('curl.requestCopyLabel'),
+    });
+    if (next === requests) return;
+    void onUpdateRequests(next);
+    expandFolder(request.folder);
+  };
+
   const moveRequest = (requestId: string, folder: string | undefined) => {
     const target = sanitizeCurlFolderPath(folder);
     const current = (requests ?? []).find((request) => request.id === requestId);
@@ -242,6 +254,16 @@ export const CurlCollections: React.FC<{
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 opacity-0 group-hover:opacity-100"
+                  aria-label={t('curl.requestDuplicate')}
+                  title={t('curl.requestDuplicate')}
+                  onClick={() => duplicateRequest(request)}
+                >
+                  <Copy size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 opacity-0 group-hover:opacity-100"
                   aria-label={t('curl.delete')}
                   onClick={() => setPendingDelete(request)}
                 >
@@ -266,6 +288,7 @@ export const CurlCollections: React.FC<{
             onMoveFolder={moveFolder}
             onOpenRequest={openRequest}
             onDeleteRequest={setPendingDelete}
+            onDuplicateRequest={duplicateRequest}
           />
         )}
       </ScrollArea>

@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Folder,
   FolderOpen,
+  Copy,
   FolderPlus,
   Pencil,
   Trash2,
@@ -188,6 +189,7 @@ interface CurlFolderTreeContextValue {
   onMoveFolder: (path: string, parent: string | undefined) => void;
   onOpenRequest: (request: CurlRequest) => void;
   onDeleteRequest: (request: CurlRequest) => void;
+  onDuplicateRequest?: (request: CurlRequest) => void;
 }
 
 const CurlFolderTreeContext = createContext<CurlFolderTreeContextValue | null>(null);
@@ -321,6 +323,20 @@ const RequestRow: React.FC<{ request: CurlRequest; depth: number }> = ({ request
       >
         <Pencil size={14} />
       </Button>
+      {context.onDuplicateRequest ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          aria-label={t('curl.requestDuplicate')}
+          title={t('curl.requestDuplicate')}
+          data-testid={`curl-request-duplicate-${request.id}`}
+          data-no-drag="true"
+          onClick={() => context.onDuplicateRequest?.(request)}
+        >
+          <Copy size={14} />
+        </Button>
+      ) : null}
       <Button
         variant="ghost"
         size="icon"
@@ -561,6 +577,7 @@ export interface CurlFolderTreeProps {
   onMoveFolder: (path: string, parent: string | undefined) => void;
   onOpenRequest: (request: CurlRequest) => void;
   onDeleteRequest: (request: CurlRequest) => void;
+  onDuplicateRequest?: (request: CurlRequest) => void;
 }
 
 export const CurlFolderTree: React.FC<CurlFolderTreeProps> = ({
@@ -578,6 +595,7 @@ export const CurlFolderTree: React.FC<CurlFolderTreeProps> = ({
   onMoveFolder,
   onOpenRequest,
   onDeleteRequest,
+  onDuplicateRequest,
 }) => {
   const { t } = useI18n();
   const { collapsed, toggleCollapsed, setCollapsed } = useCurlFolderCollapse();
@@ -685,6 +703,7 @@ export const CurlFolderTree: React.FC<CurlFolderTreeProps> = ({
     onMoveFolder,
     onOpenRequest,
     onDeleteRequest,
+    onDuplicateRequest,
   }), [
     beginDrag,
     collapsed,
@@ -700,6 +719,7 @@ export const CurlFolderTree: React.FC<CurlFolderTreeProps> = ({
     onCommitCreateFolder,
     onDeleteFolder,
     onDeleteRequest,
+    onDuplicateRequest,
     onMoveFolder,
     onMoveRequest,
     onOpenRequest,

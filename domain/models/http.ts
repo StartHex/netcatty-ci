@@ -450,3 +450,33 @@ export function rewriteCurlRequestFolders(
   });
   return changed ? next : [...requests];
 }
+
+/**
+ * Returns `requests` with a copy of `sourceId` inserted right after it. The
+ * copy keeps the folder and every setting, gets `id`, fresh timestamps and a
+ * name of the form "<name> <copyLabel>" ("… 2", "… 3" when taken). Returns the
+ * input list unchanged when the source does not exist.
+ */
+export function duplicateCurlRequest(
+  requests: readonly CurlRequest[],
+  sourceId: string,
+  options: { id: string; copyLabel: string; now?: number },
+): CurlRequest[] {
+  const index = requests.findIndex((request) => request.id === sourceId);
+  if (index < 0) return requests as CurlRequest[];
+  const source = requests[index];
+  const taken = new Set(requests.map((request) => request.name));
+  const base = `${source.name || source.url} ${options.copyLabel}`.trim();
+  let name = base;
+  for (let counter = 2; taken.has(name); counter += 1) name = `${base} ${counter}`;
+  const now = options.now ?? Date.now();
+  const copy: CurlRequest = {
+    ...(JSON.parse(JSON.stringify(source)) as CurlRequest),
+    id: options.id,
+    name,
+    createdAt: now,
+    updatedAt: now,
+  };
+  delete copy.lastUsedAt;
+  return [...requests.slice(0, index + 1), copy, ...requests.slice(index + 1)];
+}

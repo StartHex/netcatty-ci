@@ -20,6 +20,9 @@ export function ratioFromPointer(
     return clampSplitRatio((pointerY - rectTop) / rectHeight, minRatio, maxRatio);
 }
 
+/** 'vertical' stacks the panes (divider moves up/down); 'horizontal' puts them side by side. */
+export type SplitOrientation = 'vertical' | 'horizontal';
+
 export const DEFAULT_SPLIT_RATIO = 0.5;
 const MIN_SPLIT_RATIO = 0.15;
 const MAX_SPLIT_RATIO = 0.85;
@@ -58,6 +61,7 @@ export function beginSplitDrag(
     commit: (ratio: number) => void,
     minRatio = MIN_SPLIT_RATIO,
     maxRatio = MAX_SPLIT_RATIO,
+    orientation: SplitOrientation = 'vertical',
 ): void {
     if (!container) return;
     event.preventDefault();
@@ -70,7 +74,11 @@ export function beginSplitDrag(
         // Pointer capture is best effort; window listeners still work.
     }
     const onMove = (moveEvent: PointerEvent) => {
-        commit(ratioFromPointer(moveEvent.clientY, rect.top, rect.height, minRatio, maxRatio));
+        commit(
+            orientation === 'horizontal'
+                ? ratioFromPointer(moveEvent.clientX, rect.left, rect.width, minRatio, maxRatio)
+                : ratioFromPointer(moveEvent.clientY, rect.top, rect.height, minRatio, maxRatio),
+        );
     };
     const stop = () => {
         window.removeEventListener('pointermove', onMove);
@@ -96,6 +104,7 @@ export interface SplitHandleProps {
     onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
     onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
     onDoubleClick?: () => void;
+    orientation?: SplitOrientation;
 }
 
 /** The draggable divider itself, shared by every vertical split in the app. */
@@ -108,10 +117,13 @@ export const SplitHandle: React.FC<SplitHandleProps> = ({
     onPointerDown,
     onKeyDown,
     onDoubleClick,
+    orientation = 'vertical',
 }) => (
     <div
         role="separator"
-        aria-orientation="horizontal"
+        // ARIA names the separator's own direction: a divider between stacked
+        // panes is a horizontal line.
+        aria-orientation={orientation === 'horizontal' ? 'vertical' : 'horizontal'}
         aria-label={label}
         aria-valuenow={Math.round(ratio * 100)}
         aria-valuemin={Math.round(minRatio * 100)}
@@ -119,9 +131,11 @@ export const SplitHandle: React.FC<SplitHandleProps> = ({
         tabIndex={0}
         data-testid={testId}
         className={cn(
-            'group relative flex h-1.5 shrink-0 cursor-row-resize items-center justify-center',
-            'bg-transparent transition-colors focus:outline-none',
-            'before:absolute before:-top-1 before:-bottom-1 before:left-0 before:right-0 before:content-[""]',
+            'group relative flex shrink-0 items-center justify-center',
+            'bg-transparent transition-colors focus:outline-none before:absolute before:content-[""]',
+            orientation === 'horizontal'
+                ? 'w-1.5 cursor-col-resize flex-col border-l border-border/60 before:-left-1 before:-right-1 before:top-0 before:bottom-0'
+                : 'h-1.5 cursor-row-resize before:-top-1 before:-bottom-1 before:left-0 before:right-0',
         )}
         onPointerDown={onPointerDown}
         onKeyDown={onKeyDown}
@@ -132,8 +146,10 @@ export const SplitHandle: React.FC<SplitHandleProps> = ({
         <span
             aria-hidden="true"
             className={cn(
-                'pointer-events-none w-10 rounded-full bg-border transition-colors',
-                'h-px group-hover:h-[3px] group-hover:bg-primary/70 group-focus-visible:h-[3px] group-focus-visible:bg-primary/70',
+                'pointer-events-none rounded-full bg-border transition-colors group-hover:bg-primary/70 group-focus-visible:bg-primary/70',
+                orientation === 'horizontal'
+                    ? 'h-10 w-px group-hover:w-[3px] group-focus-visible:w-[3px]'
+                    : 'h-px w-10 group-hover:h-[3px] group-focus-visible:h-[3px]',
             )}
         />
     </div>
@@ -155,6 +171,8 @@ export interface VerticalSplitProps {
     topClassName?: string;
     bottomClassName?: string;
     testId?: string;
+    /** 'horizontal' shows `top` on the left and `bottom` on the right. */
+    orientation?: SplitOrientation;
 }
 
 /**
@@ -173,23 +191,25 @@ export const VerticalSplit: React.FC<VerticalSplitProps> = ({
     topClassName,
     bottomClassName,
     testId,
+    orientation = 'vertical',
 }) => {
+    const horizontal = orientation === 'horizontal';
     const containerRef = useRef<HTMLDivElement | null>(null);
     const [ratio, setRatio] = useSplitRatio(storageKey, defaultRatio, minRatio, maxRatio);
 
     const beginDrag = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
-            beginSplitDrag(event, containerRef.current, setRatio, minRatio, maxRatio);
+            beginSplitDrag(event, containerRef.current, setRatio, minRatio, maxRatio, orientation);
         },
-        [maxRatio, minRatio, setRatio],
+        [maxRatio, minRatio, orientation, setRatio],
     );
 
     const onKeyDown = useCallback(
         (event: React.KeyboardEvent<HTMLDivElement>) => {
-            if (event.key === 'ArrowUp') {
+            if (event.key === (horizontal ? 'ArrowLeft' : 'ArrowUp')) {
                 event.preventDefault();
                 setRatio(ratio - KEYBOARD_STEP);
-            } else if (event.key === 'ArrowDown') {
+            } else if (event.key === (horizontal ? 'ArrowRight' : 'ArrowDown')) {
                 event.preventDefault();
                 setRatio(ratio + KEYBOARD_STEP);
             } else if (event.key === 'Home') {
@@ -197,13 +217,21 @@ export const VerticalSplit: React.FC<VerticalSplitProps> = ({
                 setRatio(defaultRatio);
             }
         },
-        [defaultRatio, ratio, setRatio],
+        [defaultRatio, horizontal, ratio, setRatio],
     );
 
     return (
-        <div ref={containerRef} className={cn('flex min-h-0 min-w-0 flex-col', className)} data-testid={testId}>
+        <div
+            ref={containerRef}
+            className={cn('flex min-h-0 min-w-0', horizontal ? 'flex-row' : 'flex-col', className)}
+            data-testid={testId}
+            data-orientation={orientation}
+        >
+            {/* Panes clip their content: a pane dragged smaller than its
+                content's minimum size must scroll inside, never paint over
+                the divider and the neighbouring pane. */}
             <div
-                className={cn('flex min-h-0 min-w-0 flex-col', topClassName)}
+                className={cn('flex min-h-0 min-w-0 flex-col overflow-hidden', topClassName)}
                 style={{ flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 }}
             >
                 {top}
@@ -217,8 +245,9 @@ export const VerticalSplit: React.FC<VerticalSplitProps> = ({
                 onPointerDown={beginDrag}
                 onKeyDown={onKeyDown}
                 onDoubleClick={() => setRatio(defaultRatio)}
+                orientation={orientation}
             />
-            <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col', bottomClassName)}>{bottom}</div>
+            <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden', bottomClassName)}>{bottom}</div>
         </div>
     );
 };
