@@ -1815,7 +1815,7 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
           )}
           style={{ gridTemplateColumns: template }}
         >
-          <div className="select-none px-2 text-right text-[11px] tabular-nums text-muted-foreground/60">
+          <div className="sticky left-0 z-[1] h-7 select-none border-r border-border/60 bg-background px-2 text-right text-[11px] leading-7 tabular-nums text-muted-foreground/60">
             {rowNumber}
           </div>
           {editable ? (
@@ -1917,8 +1917,14 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
 
 const ROW_NUMBER_WIDTH = 44;
 const ROW_NUMBER_ITEM_HEIGHT = 28;
-// The gutter mirrors the list viewport; render a generous window and clip it.
-const ROW_NUMBER_WINDOW = 60;
+// Scrolling runs on the compositor and can outrun a React render by a frame or
+// two; this many rows above and below the viewport keep that gap filled.
+const RESULT_ROW_OVERSCAN = 16;
+// The header and the row numbers are sticky inside the scroller, so rows pass
+// underneath them: they need an opaque base under the translucent tint.
+const RESULT_HEADER_SURFACE: React.CSSProperties = {
+  backgroundImage: 'linear-gradient(hsl(var(--secondary) / 0.6), hsl(var(--secondary) / 0.6))',
+};
 
 const ResultGrid: React.FC<ResultGridProps> = ({
   columns,
@@ -1975,43 +1981,6 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   const handleCancelEdit = useCallback(() => {
     setEditing(null);
   }, []);
-  const gutterRef = useRef<HTMLDivElement | null>(null);
-  const gutterFrameRef = useRef<number | null>(null);
-  const gutterTopRef = useRef(0);
-  const gutterMetaRef = useRef({ start: 0, count: 0 });
-  const gutterFirstRef = useRef(Number.NaN);
-  gutterMetaRef.current = { start: rowNumberStart, count: rows.length };
-
-  // The gutter is refreshed imperatively: a React render per scroll frame would
-  // re-diff every visible cell and make wheel scrolling feel heavy.
-  const handleListScroll = useCallback((scrollTop: number) => {
-    gutterTopRef.current = scrollTop;
-    if (gutterFrameRef.current !== null) return;
-    gutterFrameRef.current = window.requestAnimationFrame(() => {
-      gutterFrameRef.current = null;
-      const host = gutterRef.current;
-      if (!host) return;
-      const top = gutterTopRef.current;
-      const { start, count } = gutterMetaRef.current;
-      const first = Math.floor(top / ROW_NUMBER_ITEM_HEIGHT);
-      // Fixed child offsets + one transform keeps this to a single style write
-      // per frame; the labels are only rewritten when a row crosses the edge.
-      host.style.transform = `translateY(${first * ROW_NUMBER_ITEM_HEIGHT - top}px)`;
-      if (first === gutterFirstRef.current) return;
-      gutterFirstRef.current = first;
-      for (let offset = 0; offset < ROW_NUMBER_WINDOW; offset += 1) {
-        const node = host.children[offset] as HTMLElement | undefined;
-        if (!node) continue;
-        const index = first + offset;
-        const label = index >= 0 && index < count ? String(start + index + 1) : '';
-        if (node.textContent !== label) node.textContent = label;
-      }
-    });
-  }, []);
-
-  useEffect(() => () => {
-    if (gutterFrameRef.current !== null) window.cancelAnimationFrame(gutterFrameRef.current);
-  }, []);
   const [menu, setMenu] = useState<
     { x: number; y: number; columnIndex: number | null; sourceIndex: number | null } | null
   >(null);
@@ -2059,6 +2028,11 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   const width = columnWidths.reduce((total, entry) => total + Math.round(entry), 0)
     + ROW_NUMBER_WIDTH
     + (editable ? ACTION_COLUMN_WIDTH : 0);
+
+  const contentSize: React.CSSProperties = {
+    minWidth: '100%',
+    width: width > 0 ? `${width}px` : undefined,
+  };
 
   const commitEdit = async () => {
     if (!editing || !onUpdateCell) {
@@ -2118,17 +2092,26 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   return (
     <>
       <div className="relative flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden [&::-webkit-scrollbar]:h-2.5 [&::-webkit-scrollbar]:w-2.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-solid [&::-webkit-scrollbar-thumb]:border-background [&::-webkit-scrollbar-thumb]:bg-clip-padding [&::-webkit-scrollbar-track]:bg-transparent">
-        <div
-          className="flex min-h-0 flex-1 flex-col"
-          style={{ minWidth: '100%', width: width > 0 ? `${width}px` : undefined }}
-        >
+          <FixedSizeVirtualList
+            ref={listRef}
+            items={rows as { cells: DbCellValue[]; sourceIndex: number }[]}
+            itemHeight={ROW_NUMBER_ITEM_HEIGHT}
+            headerHeight={ROW_NUMBER_ITEM_HEIGHT}
+            overscan={RESULT_ROW_OVERSCAN}
+            // One scroller for both axes: the header (sticky top) and the row
+            // numbers (sticky left) are pinned by the compositor, so nothing
+            // has to be mirrored from scroll events.
+            className="min-h-0 flex-1 overflow-auto [&::-webkit-scrollbar]:h-2.5 [&::-webkit-scrollbar]:w-2.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-solid [&::-webkit-scrollbar-thumb]:border-background [&::-webkit-scrollbar-thumb]:bg-clip-padding [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-corner]:bg-transparent"
+            contentStyle={contentSize}
+            getItemKey={(_row, index) => String(index)}
+            header={
           <div
-            className="sticky top-0 z-10 grid h-7 shrink-0 border-b border-border/60 bg-secondary/60"
-            style={{ gridTemplateColumns: template }}
+            className="sticky top-0 z-10 grid h-7 shrink-0 border-b border-border/60 bg-background"
+            style={{ ...RESULT_HEADER_SURFACE, ...contentSize, gridTemplateColumns: template }}
           >
             <div
-              className="px-2 py-1.5 text-right text-[11px] font-semibold tabular-nums text-muted-foreground/60"
+              className="sticky left-0 z-[1] border-r border-border/60 bg-background px-2 py-1.5 text-right text-[11px] font-semibold tabular-nums text-muted-foreground/60"
+              style={RESULT_HEADER_SURFACE}
               title={t('databases.workbench.rowNumber')}
             >
               #
@@ -2234,13 +2217,7 @@ const ResultGrid: React.FC<ResultGridProps> = ({
               );
             })}
           </div>
-          <FixedSizeVirtualList
-            ref={listRef}
-            items={rows as { cells: DbCellValue[]; sourceIndex: number }[]}
-            itemHeight={ROW_NUMBER_ITEM_HEIGHT}
-            onScroll={handleListScroll}
-            className="min-h-0 flex-1"
-            getItemKey={(_row, index) => String(index)}
+            }
             renderItem={(row, rowIndex) => (
               <ResultRow
                 row={row}
@@ -2264,26 +2241,6 @@ const ResultGrid: React.FC<ResultGridProps> = ({
               />
             )}
           />
-        </div>
-        </div>
-        <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-11 border-r border-border/60 bg-background">
-          <div className="h-7 border-b border-border/60 bg-secondary/60" />
-          <div className="relative h-[calc(100%-1.75rem)] overflow-hidden">
-            <div ref={gutterRef} className="absolute inset-0">
-              {Array.from({ length: ROW_NUMBER_WINDOW }, (_unused, offset) => (
-                <div
-                  key={offset}
-                  className="absolute left-0 right-0 pr-2 text-right text-[11px] tabular-nums text-muted-foreground/60"
-                  style={{
-                    top: offset * ROW_NUMBER_ITEM_HEIGHT,
-                    height: ROW_NUMBER_ITEM_HEIGHT,
-                    lineHeight: `${ROW_NUMBER_ITEM_HEIGHT}px`,
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
       </div>
       <Dialog open={Boolean(preview)} onOpenChange={(open) => { if (!open) setPreview(null); }}>
         <DialogContent className="flex max-h-[80vh] w-[min(760px,calc(100vw-2rem))] flex-col overflow-hidden">
