@@ -26,6 +26,7 @@ import { fontStore } from "../../../application/state/fontStore";
 import { KeywordHighlighter } from "../keywordHighlight";
 import { installSearchDecorationTracker } from "../hooks/useTerminalSearch";
 import { CursorLineHighlighter } from "./cursorLineHighlight";
+import { TERMINAL_LINE_ACTION_EVENT } from "./terminalLineTools";
 import { resolveCursorLineHighlightBackground } from "../../../domain/cursorLineHighlight";
 import { normalizeCursorBarWidth } from "../../../domain/models/terminal";
 import {
@@ -2580,6 +2581,18 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
             }
             case "searchTerminal": {
               ctx.requestSearchFocus();
+              break;
+            }
+            case "toggleTerminalLineNumbers":
+            case "goToTerminalLine":
+            case "toggleTerminalLineMark":
+            case "nextTerminalLineMark":
+            case "prevTerminalLineMark": {
+              // Handled by the terminal view, which owns the gutter and panel.
+              term.element?.dispatchEvent(new CustomEvent(TERMINAL_LINE_ACTION_EVENT, {
+                bubbles: true,
+                detail: { action },
+              }));
               break;
             }
             case "increaseTerminalFontSize":

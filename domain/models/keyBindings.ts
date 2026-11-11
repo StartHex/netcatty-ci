@@ -255,6 +255,11 @@ export const DEFAULT_KEY_BINDINGS: KeyBinding[] = [
   { id: 'increase-terminal-font-size', action: 'increaseTerminalFontSize', label: 'Increase Terminal Font Size', mac: '⌘ + =', pc: 'Ctrl + =', category: 'terminal' },
   { id: 'decrease-terminal-font-size', action: 'decreaseTerminalFontSize', label: 'Decrease Terminal Font Size', mac: '⌘ + -', pc: 'Ctrl + -', category: 'terminal' },
   { id: 'reset-terminal-font-size', action: 'resetTerminalFontSize', label: 'Reset Terminal Font Size', mac: '⌘ + 0', pc: 'Ctrl + 0', category: 'terminal' },
+  { id: 'toggle-terminal-line-numbers', action: 'toggleTerminalLineNumbers', label: 'Toggle Terminal Line Numbers', mac: '⌘ + Shift + L', pc: 'Ctrl + Shift + L', category: 'terminal' },
+  { id: 'go-to-terminal-line', action: 'goToTerminalLine', label: 'Go to Terminal Line / Copy Line Range', mac: '⌘ + G', pc: 'Ctrl + Shift + G', category: 'terminal' },
+  { id: 'toggle-terminal-line-mark', action: 'toggleTerminalLineMark', label: 'Toggle Mark on Terminal Line', mac: '⌘ + Shift + M', pc: 'Ctrl + Shift + M', category: 'terminal' },
+  { id: 'next-terminal-line-mark', action: 'nextTerminalLineMark', label: 'Next Terminal Line Mark', mac: '⌘ + Shift + ↓', pc: 'Ctrl + Shift + ↓', category: 'terminal' },
+  { id: 'prev-terminal-line-mark', action: 'prevTerminalLineMark', label: 'Previous Terminal Line Mark', mac: '⌘ + Shift + ↑', pc: 'Ctrl + Shift + ↑', category: 'terminal' },
 
   // Navigation / Split View
   { id: 'move-focus', action: 'moveFocus', label: 'Move focus between Split View panes', mac: '⌘ + ⌥ + arrows', pc: 'Ctrl + Alt + arrows', category: 'navigation' },

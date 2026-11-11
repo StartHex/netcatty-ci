@@ -352,6 +352,8 @@ export interface Host {
   // Show local timestamps for this host beside terminal output rows.
   // Kept per-host because timestamp visibility is usually a host/workflow preference.
   showLineTimestamps?: boolean;
+  /** Show a line-number gutter beside this host's terminal output. */
+  showLineNumbers?: boolean;
   // What the Backspace key sends: undefined = xterm default (no interception), 'ctrl-h' = ^H (0x08)
   backspaceBehavior?: 'ctrl-h';
   // When true, tab titles stay on the connection label instead of following the

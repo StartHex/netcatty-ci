@@ -188,3 +188,8 @@ jobs:
 
       - name: Exercise two SSH password prompts in the desktop app
         run: node scripts/terminal-broadcast-ssh.live.cjs
+
+      - name: Exercise terminal line numbers, marks and range copy in the desktop app
+        env:
+          NETCATTY_LINE_TOOLS_SCREENSHOT: "1"
+        run: node scripts/terminal-line-tools.live.cjs
