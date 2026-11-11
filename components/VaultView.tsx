@@ -162,6 +162,7 @@ import { VaultViewLayout } from "./vault/VaultViewLayout";
 import { useVaultHostCollections } from "./vault/useVaultHostCollections";
 import { useVaultImportHandlers } from "../application/state/useVaultImportHandlers";
 import { useVaultGroupDragHandlers } from "./vault/useVaultGroupDragHandlers";
+import { usePluginVaultPages } from "../application/state/usePluginVaultPages";
 
 const LazyProtocolSelectDialog = lazy(() => import("./ProtocolSelectDialog"));
 const LazyConnectionLogsManager = lazy(() => import("./ConnectionLogsManager"));
@@ -192,7 +193,8 @@ export type VaultSection =
   | "notes"
   | "port"
   | "knownhosts"
-  | "logs";
+  | "logs"
+  | `plugin-vault:${string}`;
 
 const haveSameHostOrderResult = (previous: Host[], next: Host[]) => {
   if (previous.length !== next.length) return false;
@@ -399,11 +401,12 @@ const VaultViewInner: React.FC<VaultViewProps> = ({
   onVaultFocusRequestHandled,
   terminalSettings,
 }) => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const rootRef = useRef<HTMLDivElement>(null);
   const hostsRef = useRef(hosts);
   hostsRef.current = hosts;
   const [currentSection, setCurrentSection] = useState<VaultSection>("hosts");
+  const pluginVault = usePluginVaultPages({ locale, section: currentSection, select: setCurrentSection });
   const [search, setSearch] = useState("");
   const [selectedGroupPath, setSelectedGroupPath] = useState<string | null>(
     null,
@@ -1594,6 +1597,7 @@ const VaultViewInner: React.FC<VaultViewProps> = ({
           ContextMenuTrigger,
           Copy,
           currentSection,
+          pluginVault,
           customGroups,
           deleteGroupPath,
           deleteGroupPaths,

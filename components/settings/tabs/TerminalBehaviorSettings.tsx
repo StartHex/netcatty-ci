@@ -60,6 +60,14 @@ export const TerminalBehaviorSettings: React.FC<TerminalBehaviorSettingsProps> =
         </SettingRow>
 
         <SettingRow
+          anchorId="terminal-context-chips"
+          label={t("settings.terminal.behavior.contextChips")}
+          description={t("settings.terminal.behavior.contextChips.desc")}
+        >
+          <Toggle checked={terminalSettings.contextChipsEnabled !== false} onChange={(v) => updateTerminalSetting("contextChipsEnabled", v)} />
+        </SettingRow>
+
+        <SettingRow
           anchorId="terminal-auto-close-on-exit"
           label={t("settings.terminal.behavior.autoCloseOnExit")}
           description={t("settings.terminal.behavior.autoCloseOnExit.desc")}
