@@ -1322,7 +1322,7 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
             data-font-smoothing={terminalSettings?.fontSmoothing !== false ? "true" : "false"}
             style={{
               top: terminalContentTop,
-              left: activeLineNumberGutterWidth + activeLineTimestampGutterWidth + terminalBodyInset,
+              left: activeLineTimestampGutterWidth + terminalBodyInset + activeLineNumberGutterWidth,
               right: terminalRightInset,
               bottom: terminalBottomInset,
               paddingLeft: 6,
