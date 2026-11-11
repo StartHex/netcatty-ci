@@ -44,6 +44,17 @@ const PASTED_MARKDOWN_PATTERNS = [
 const BARE_HTML_TAG_RE =
   /<\/?(?:a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|section|select|slot|small|source|span|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|video|wbr)(?:\s|\/|>)/i;
 
+const HTML_ATTRIBUTE_SOURCE =
+  String.raw`(?:\s+[a-zA-Z_:@][\w:.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>\`]+))?)*`;
+
+/** A whole tag: `<name attr="v">`, `<name/>` or `</name>`. */
+const COMPLETE_HTML_TAG_RE = new RegExp(
+  String.raw`<(?:[a-zA-Z][a-zA-Z0-9:-]*${HTML_ATTRIBUTE_SOURCE}\s*\/?|\/[a-zA-Z][a-zA-Z0-9:-]*\s*)>`,
+);
+
+const KNOWN_HTML_TAG_NAME_RE =
+  /^(?:a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|nav|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|section|select|slot|small|source|span|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|video|wbr)$/i;
+
 /** True when plain clipboard text already looks like structured markdown source. */
 export const shouldInsertClipboardTextAsMarkdown = (text: string): boolean => {
   const markdown = text.replace(/\r\n?/g, "\n").trim();
@@ -79,6 +90,20 @@ export const plainMarkdownContainsHtml = (text: string): boolean => {
   if (/<[a-z][a-z0-9:-]*\s+[^>]*>/i.test(text)) return true;
   if (/<[a-z][a-z0-9:-]*\s*\/>/i.test(text)) return true;
   return BARE_HTML_TAG_RE.test(text);
+};
+
+/**
+ * True when plain text contains at least one complete, well-formed HTML tag
+ * (`<div>`, `</p>`, `<img src="x">`, `<br/>`) or a comment / doctype.
+ *
+ * Stricter than {@link looksLikeClipboardHtml}: a lone `<` followed by a
+ * letter — passwords and tokens (`Uf7,Ly2<c8`), comparisons (`a<b`), generics
+ * (`List<T`) — is NOT markup. Feeding such text to an HTML parser makes it
+ * read the tail as an unterminated tag and drop it.
+ */
+export const plainTextContainsCompleteHtmlTag = (text: string): boolean => {
+  if (/<!--[\s\S]*?-->/.test(text) || /<!doctype\b[^>]*>/i.test(text)) return true;
+  return COMPLETE_HTML_TAG_RE.test(text);
 };
 
 /**
@@ -686,6 +711,94 @@ const mapOutsideCode = (markdown: string, fn: (plain: string) => string): string
   return unmaskCodeRegions(fn(text), slots, sentinel);
 };
 
+const STICKY_OPEN_TAG_RE = new RegExp(
+  String.raw`<([a-zA-Z][a-zA-Z0-9:-]*)${HTML_ATTRIBUTE_SOURCE}\s*(\/?)>`,
+  "y",
+);
+const STICKY_CLOSE_TAG_RE = /<\/([a-zA-Z][a-zA-Z0-9:-]*)\s*>/y;
+const STICKY_AUTOLINK_RE = /<((?:https?|ftp):\/\/[^\s<>]+|mailto:[^\s<>]+)>/y;
+
+/**
+ * Make every `<` that is not real markup literal (`\<`).
+ *
+ * The rich editor parses notes as MDX, where `<` always opens a JSX tag: a
+ * stray one (`Uf7,Ly2<c8`, `a < b`, `List<string>`, `mysql -h <host>`) is a
+ * parse error and the whole paste is rejected. Kept as markup: comments,
+ * known HTML elements, and unknown elements that are self-closing or have a
+ * matching closing tag. `<https://…>` autolinks, which MDX also rejects,
+ * become bare URLs. Code spans / blocks are never touched.
+ */
+export const escapeStrayAngleBrackets = (markdown: string): string => {
+  if (!markdown.includes("<")) return markdown;
+  return mapOutsideCode(markdown, (plain) => {
+    let out = "";
+    let index = 0;
+    while (index < plain.length) {
+      const char = plain[index];
+      if (char === "\\") {
+        // Keep existing escapes (and whatever they escape) as they are.
+        out += plain.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+      if (char !== "<") {
+        out += char;
+        index += 1;
+        continue;
+      }
+      if (plain.startsWith("<!--", index)) {
+        const end = plain.indexOf("-->", index + 4);
+        if (end >= 0) {
+          out += plain.slice(index, end + 3);
+          index = end + 3;
+          continue;
+        }
+      }
+      STICKY_AUTOLINK_RE.lastIndex = index;
+      const autolink = STICKY_AUTOLINK_RE.exec(plain);
+      if (autolink) {
+        out += autolink[1];
+        index += autolink[0].length;
+        continue;
+      }
+      STICKY_CLOSE_TAG_RE.lastIndex = index;
+      const close = STICKY_CLOSE_TAG_RE.exec(plain);
+      if (close) {
+        const name = close[1];
+        const opened = new RegExp(String.raw`<${escapeRegExp(name)}(?=[\s/>])`, "i").test(plain.slice(0, index));
+        if (KNOWN_HTML_TAG_NAME_RE.test(name) || opened) {
+          out += close[0];
+          index += close[0].length;
+          continue;
+        }
+      }
+      STICKY_OPEN_TAG_RE.lastIndex = index;
+      const open = STICKY_OPEN_TAG_RE.exec(plain);
+      if (open) {
+        const name = open[1];
+        const selfClosing = open[2] === "/";
+        const closed = new RegExp(String.raw`<\/${escapeRegExp(name)}\s*>`, "i").test(plain.slice(index + open[0].length));
+        if (KNOWN_HTML_TAG_NAME_RE.test(name) || selfClosing || closed) {
+          out += open[0];
+          index += open[0].length;
+          continue;
+        }
+      }
+      out += "\\<";
+      index += 1;
+    }
+    return out;
+  });
+};
+
+/** Undo markdown backslash escapes, to compare converted text with its source. */
+const unescapeMarkdownPunctuation = (value: string): string => (
+  value.replace(/\\([!-/:-@[-`{-~])/g, "$1")
+);
+
+/** Whitespace-insensitive identity of a piece of text. */
+const collapseWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
+
 export const normalizePastedNoteMarkdown = (markdown: string): string => {
   // Badge + bare <img> cleanup only outside fenced/indented/inline code so
   // samples like `[](https://…)` inside fences are not rewritten.
@@ -849,42 +962,49 @@ export const resolveNoteClipboardPaste = (input: {
   const plain = (input.plainText ?? "").replace(/\r\n?/g, "\n");
   const html = input.htmlText ?? "";
 
+  // Everything handed to the editor as markdown goes through the MDX parser,
+  // so stray `<` must be literal or the paste is rejected as a whole.
+  const asMarkdown = (text: string, kind: "markdown" | "html-converted"): NoteClipboardPastePayload => (
+    { text: escapeStrayAngleBrackets(text), kind }
+  );
+  // HTML that only wraps the same words as text/plain (a browser or terminal
+  // selection of plain text) carries no structure: let the editor paste the
+  // plain text natively, byte for byte.
+  const addsNothingToPlain = (converted: string): boolean => (
+    plain.trim() !== ""
+    && collapseWhitespace(unescapeMarkdownPunctuation(converted)) === collapseWhitespace(plain)
+  );
+
   // 1) Structured plain Markdown is authoritative (browser often also puts
   //    wrapper HTML that would escape # / ** if Turndown runs first).
   if (shouldInsertClipboardTextAsMarkdown(plain)) {
-    if (plainMarkdownContainsHtml(plain)) {
+    if (plainMarkdownContainsHtml(plain) && plainTextContainsCompleteHtmlTag(plain)) {
       const converted = convertHtmlIslandsInMarkdown(plain);
       if (converted.trim()) {
-        return {
-          text: converted,
-          kind: plainMarkdownContainsHtml(converted) ? "markdown" : "html-converted",
-        };
+        return asMarkdown(converted, plainMarkdownContainsHtml(converted) ? "markdown" : "html-converted");
       }
     }
-    return { text: normalizePastedNoteMarkdown(plain), kind: "markdown" };
+    return asMarkdown(normalizePastedNoteMarkdown(plain), "markdown");
   }
 
   // 2) Rich HTML document (browser / Word / GitHub render clipboard)
-  if (looksLikeClipboardHtml(html) && isPrimarilyHtmlDocument(html)) {
-    const converted = convertClipboardHtmlToMarkdown(html);
-    if (converted.trim()) {
-      return { text: converted, kind: "html-converted" };
-    }
-  }
-
   // 3) Non-primary HTML fragment when plain is unstructured
   if (looksLikeClipboardHtml(html)) {
     const converted = convertClipboardHtmlToMarkdown(html);
     if (converted.trim()) {
-      return { text: converted, kind: "html-converted" };
+      if (addsNothingToPlain(converted)) return { text: plain, kind: "plain" };
+      return asMarkdown(converted, "html-converted");
     }
   }
 
-  // 4) Plain that is mostly HTML fragment
-  if (looksLikeClipboardHtml(plain)) {
+  // 4) Plain that is mostly an HTML fragment. Requires a complete tag: a bare
+  //    `<` + letter (`Uf7,Ly2<c8`, `a<b`) is text, and an HTML parser would
+  //    swallow everything after it as an unterminated tag.
+  if (plainTextContainsCompleteHtmlTag(plain) && looksLikeClipboardHtml(plain)) {
     const converted = convertClipboardHtmlToMarkdown(plain);
-    if (converted.trim()) {
-      return { text: converted, kind: "html-converted" };
+    // Never trade the clipboard for a conversion that lost its text.
+    if (converted.trim() && !addsNothingToPlain(converted)) {
+      return asMarkdown(converted, "html-converted");
     }
   }
 

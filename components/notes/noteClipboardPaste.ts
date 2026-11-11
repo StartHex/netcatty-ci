@@ -8,6 +8,8 @@ export {
   shouldInsertClipboardTextAsMarkdown,
   looksLikeClipboardHtml,
   plainMarkdownContainsHtml,
+  plainTextContainsCompleteHtmlTag,
+  escapeStrayAngleBrackets,
   isPrimarilyHtmlDocument,
   isCenteredBlockElement,
   htmlOpenTagIsCentered,
