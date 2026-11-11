@@ -204,8 +204,11 @@ namespace NetcattySetup
         public static string Classic { get { return Pick("Use the classic installer", "使用经典安装程序", "使用傳統安裝程式"); } }
         public static string ChooseFolder { get { return Pick("Choose where to install Netcatty", "选择 Netcatty 的安装位置", "選擇 Netcatty 的安裝位置"); } }
         public static string NoPayload { get { return Pick("This setup file is incomplete. Download it again.", "安装文件不完整，请重新下载。", "安裝檔不完整，請重新下載。"); } }
+        public static string Cancelled { get { return Pick("Administrator permission was not given, so nothing was installed.", "没有获得管理员权限，未进行安装。", "沒有取得系統管理員權限，未進行安裝。"); } }
+        public static string LogAt { get { return Pick("Details: {0}", "详细日志：{0}", "詳細記錄：{0}"); } }
         public static string NotWritable { get { return Pick("Cannot write to this folder. Choose another one, or use the classic installer.", "无法写入这个文件夹。请换一个位置，或使用经典安装程序。", "無法寫入這個資料夾。請換一個位置，或使用傳統安裝程式。"); } }
         public static string ExitCode { get { return Pick("The installer stopped with code {0}.", "安装程序以代码 {0} 结束。", "安裝程式以代碼 {0} 結束。"); } }
+        public static string OpeningClassic { get { return Pick("Opening the classic installer…", "正在打开经典安装程序…", "正在開啟傳統安裝程式…"); } }
         public static string CancelRunning { get { return Pick("Installation is still running.", "安装仍在进行中。", "安裝仍在進行中。"); } }
     }
 
@@ -319,6 +322,18 @@ namespace NetcattySetup
         /// <summary>Folder of an existing Netcatty install, or null.</summary>
         public static string FindExisting(string productName)
         {
+            bool machine;
+            return FindExisting(productName, out machine);
+        }
+
+        /// <summary>
+        /// Folder of an existing Netcatty install, or null. machine is true when
+        /// that copy was installed for all users, which needs administrator
+        /// rights to replace.
+        /// </summary>
+        public static string FindExisting(string productName, out bool machine)
+        {
+            machine = false;
             foreach (RegistryKey root in new RegistryKey[] { Registry.CurrentUser, Registry.LocalMachine })
             {
                 try
@@ -337,7 +352,11 @@ namespace NetcattySetup
                                 string location = entry.GetValue("InstallLocation") as string;
                                 if (string.IsNullOrEmpty(location)) location = FolderOf(entry.GetValue("DisplayIcon") as string);
                                 if (string.IsNullOrEmpty(location)) location = FolderOf(entry.GetValue("UninstallString") as string);
-                                if (!string.IsNullOrEmpty(location) && Directory.Exists(location)) return location.TrimEnd('\\');
+                                if (!string.IsNullOrEmpty(location) && Directory.Exists(location))
+                                {
+                                    machine = root == Registry.LocalMachine;
+                                    return location.TrimEnd('\\');
+                                }
                             }
                         }
                     }
@@ -395,6 +414,22 @@ namespace NetcattySetup
             }
             catch (Exception) { }
             return total;
+        }
+
+        public static bool IsElevated()
+        {
+            try
+            {
+                using (System.Security.Principal.WindowsIdentity identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+                {
+                    return new System.Security.Principal.WindowsPrincipal(identity)
+                        .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         public static bool CanWrite(string dir)
@@ -497,6 +532,7 @@ namespace NetcattySetup
         private readonly string productName;
         private readonly string exeName;
         private readonly string existingDir;
+        private readonly bool existingIsMachine;
 
         private string installDir;
         private bool dirChosenByUser;
@@ -526,7 +562,7 @@ namespace NetcattySetup
             this.payload = payload;
             productName = payload.Get("productName", "Netcatty");
             exeName = payload.Get("exeName", productName + ".exe");
-            existingDir = InstallLocator.FindExisting(productName);
+            existingDir = InstallLocator.FindExisting(productName, out existingIsMachine);
             installDir = !string.IsNullOrEmpty(options.Dir) ? options.Dir : (existingDir ?? InstallLocator.DefaultFor(productName));
             dirChosenByUser = !string.IsNullOrEmpty(options.Dir);
 
@@ -984,7 +1020,9 @@ namespace NetcattySetup
             Log.Write("failed: " + detail);
             installing = false;
             exitCode = 1;
-            failedDetail.Text = detail;
+            failedDetail.Text = string.IsNullOrEmpty(Log.File)
+                ? detail
+                : detail + "\n" + string.Format(CultureInfo.CurrentCulture, Strings.LogAt, Log.File);
             ShowScreen(Screen.Failed);
             if (options.Auto) Close();
         }
@@ -1000,17 +1038,15 @@ namespace NetcattySetup
             // An existing install is replaced in place by the installer itself;
             // only a folder the user picked needs to be checked and passed on.
             bool passDir = dirChosenByUser && !string.Equals(installDir, existingDir, StringComparison.OrdinalIgnoreCase);
-            if (!classic && passDir && !InstallLocator.CanWrite(installDir))
-            {
-                Fail(Strings.NotWritable);
-                return;
-            }
+            // A copy installed for all users, or a folder this account cannot
+            // write to (Program Files), is an all-users install.
+            bool allUsers = passDir ? !InstallLocator.CanWrite(installDir) : existingIsMachine;
             installing = true;
             exitCode = 0;
             ShowScreen(Screen.Installing);
             SetProgress(0, Strings.Preparing);
             string dir = installDir;
-            Thread worker = new Thread(delegate() { InstallWorker(classic, passDir, dir); });
+            Thread worker = new Thread(delegate() { InstallWorker(classic, passDir, allUsers, dir); });
             worker.IsBackground = true;
             worker.Start();
         }
@@ -1020,7 +1056,20 @@ namespace NetcattySetup
             Dispatcher.BeginInvoke(DispatcherPriority.Normal, action);
         }
 
-        private void InstallWorker(bool classic, bool passDir, string dir)
+        /// <summary>Exit codes with the top bit set are Windows crash codes (0xC0000005 and the like).</summary>
+        private static bool IsCrashCode(int code)
+        {
+            return code < 0;
+        }
+
+        private static string FormatCode(int code)
+        {
+            return code < 0
+                ? "0x" + code.ToString("X8", CultureInfo.InvariantCulture)
+                : code.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private void InstallWorker(bool classic, bool passDir, bool allUsers, string dir)
         {
             string tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "NetcattySetup-" + Guid.NewGuid().ToString("N"));
             string installer = System.IO.Path.Combine(tempDir, productName + "-Installer.exe");
@@ -1041,11 +1090,17 @@ namespace NetcattySetup
                 // /D= must come last and is taken literally to the end of the
                 // line, so the path is not quoted even when it contains spaces.
                 string arguments = classic ? "" : "/S";
+                if (!classic && allUsers) arguments += " /allusers";
                 if (passDir) arguments += (arguments.Length > 0 ? " " : "") + "/D=" + dir;
                 ProcessStartInfo start = new ProcessStartInfo(installer, arguments);
-                start.UseShellExecute = false;
                 start.WorkingDirectory = tempDir;
-                Log.Write("running installer " + arguments);
+                // An all-users install needs administrator rights. Asking for
+                // them here, with the normal Windows prompt, keeps the silent
+                // installer from trying to raise its own rights half-way.
+                bool elevate = !classic && allUsers && !InstallLocator.IsElevated();
+                start.UseShellExecute = elevate;
+                if (elevate) start.Verb = "runas";
+                Log.Write("running installer " + arguments + (elevate ? " (elevated)" : ""));
 
                 bool hadFiles = InstallLocator.DirectorySize(dir) > 0;
                 long expected = Math.Max(1, payload.GetLong("unpackedBytes", 0));
@@ -1067,7 +1122,7 @@ namespace NetcattySetup
                         Ui(delegate { SetProgress(value, status); });
                     }
                     int code = process.ExitCode;
-                    Log.Write("installer exited with " + code);
+                    Log.Write("installer exited with " + FormatCode(code));
                     string target = dir;
                     if (!System.IO.File.Exists(System.IO.Path.Combine(target, exeName)))
                     {
@@ -1092,12 +1147,31 @@ namespace NetcattySetup
                             // The classic wizard was cancelled by the user.
                             ShowScreen(Screen.Welcome);
                         }
+                        else if (IsCrashCode(code) && !options.Auto)
+                        {
+                            // The silent run crashed on this machine. The wizard
+                            // inside the same package installs the same files,
+                            // so open it instead of leaving the user stuck.
+                            Log.Write("silent install crashed, opening the classic installer");
+                            StartInstall(true);
+                            statusText.Text = Strings.OpeningClassic;
+                        }
                         else
                         {
-                            Fail(string.Format(CultureInfo.CurrentCulture, Strings.ExitCode, code));
+                            Fail(string.Format(CultureInfo.CurrentCulture, Strings.ExitCode, FormatCode(code)));
                         }
                     });
                 }
+            }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                // 1223: the user said no at the administrator prompt.
+                string message = error.NativeErrorCode == 1223 ? Strings.Cancelled : error.Message;
+                Ui(delegate
+                {
+                    if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                    Fail(message);
+                });
             }
             catch (Exception error)
             {
@@ -1248,7 +1322,21 @@ namespace NetcattySetup
                 else if (arg == "--selftest" && next != null) { options.SelfTestDir = next; index += 1; }
                 else if (arg == "--lang" && next != null) { options.Lang = next; index += 1; }
             }
+            // Always keep a log: when an install fails on someone's machine it
+            // is the only record of what the installer did.
             Log.File = options.LogFile;
+            if (string.IsNullOrEmpty(Log.File) && options.SelfTestDir == null)
+            {
+                try
+                {
+                    Log.File = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "NetcattySetup.log");
+                    System.IO.File.WriteAllText(Log.File, "");
+                }
+                catch (Exception)
+                {
+                    Log.File = null;
+                }
+            }
             if (options.Lang != null) Strings.Use(options.Lang);
             Log.Write("setup shell started");
             try

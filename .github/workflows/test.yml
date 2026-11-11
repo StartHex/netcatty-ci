@@ -161,35 +161,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Diagnosis: runs the installer that is published right now through fresh
-  # install, upgrade, upgrade-while-running and a real mouse click.
-  windows-setup-published:
-    name: windows-setup-published
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-
-      - name: Download the newest published installer
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          name="$(gh release view fork-windows-x64-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name | endswith("-win-x64.exe"))] | sort_by(.createdAt) | last | .name')"
-          echo "installer: $name"
-          gh release download fork-windows-x64-latest --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir published
-          ls -l published
-
-      - name: Install it the ways users do
-        shell: bash
-        run: node scripts/test-windows-setup-scenarios.cjs --shell "$(find published -name '*.exe' | head -n 1)"
-
   windows-broadcast-ssh:
     name: windows-broadcast-ssh
     runs-on: windows-latest

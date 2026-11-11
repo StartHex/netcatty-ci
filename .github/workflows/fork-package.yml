@@ -114,6 +114,10 @@ jobs:
           test -n "$shell_exe"
           node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --screens --dump
           node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
+          # The ways people really install: default folder, over an existing
+          # copy, while the app is running, with a real click, and over a copy
+          # installed for all users.
+          node scripts/test-windows-setup-scenarios.cjs --shell "$shell_exe"
 
       - name: Verify node-pty Linux runtime
         if: matrix.name == 'linux-x64'
