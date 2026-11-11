@@ -99,6 +99,22 @@ jobs:
       - name: Test packaged SSH cipher negotiation
         run: node scripts/test-packaged-ssh-ciphers.cjs
 
+      # Wrap the NSIS installer in the dark glass setup window. The wrapped
+      # file takes the installer's name, so it is the one that gets uploaded;
+      # the NSIS package inside is unchanged and still does the installing.
+      - name: Build Windows setup shell
+        if: matrix.name == 'windows-x64'
+        run: node scripts/build-windows-setup-shell.cjs
+
+      - name: Test Windows setup shell
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        run: |
+          shell_exe="$(find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' | head -n 1)"
+          test -n "$shell_exe"
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --screens --dump
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
+
       - name: Verify node-pty Linux runtime
         if: matrix.name == 'linux-x64'
         run: bash scripts/ensure-node-pty-linux.sh verify x64
@@ -114,7 +130,7 @@ jobs:
           mkdir -p release-upload
           case "${{ matrix.name }}" in
             windows-x64)
-              find release -maxdepth 1 -type f -name '*-win-x64.exe' ! -name '*portable*' -exec cp -v '{}' release-upload/ ';'
+              find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' -exec cp -v '{}' release-upload/ ';'
               ;;
             macos)
               find release -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' \) -exec cp -v '{}' release-upload/ ';'
@@ -169,6 +185,8 @@ jobs:
             gh release create "$tag" --title "$title" --notes "$notes" --prerelease
           fi
           gh release upload "$tag" release-upload/* --clobber
+          # Keep the download page short: only the three newest builds stay.
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
 
       - name: Publish macOS release assets
         if: matrix.name == 'macos'
@@ -187,6 +205,7 @@ jobs:
             gh release create "$tag" --title "$title" --notes "$notes" --prerelease
           fi
           gh release upload "$tag" release-upload/* --clobber
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
 
       # The in-app update check reads these releases (tag v<version>). Only
       # builds of the default branch are published as versions; builds of any

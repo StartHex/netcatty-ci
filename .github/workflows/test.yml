@@ -130,6 +130,37 @@ jobs:
           NETCATTY_FIDO_WINDOWS: "1"
         run: node --test scripts/fido-windows.live.test.cjs electron/bridges/fidoNativeAgent.test.cjs electron/bridges/fidoAskpass.winpath.test.cjs
 
+  windows-setup-shell:
+    name: windows-setup-shell
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Compiles the installer window with the C# compiler Windows ships and
+      # renders every screen. The PNGs are printed to the log so the layout
+      # can be reviewed without downloading artifacts.
+      - name: Compile setup shell
+        run: node scripts/build-windows-setup-shell.cjs --stub-only --version 1.2.3-fork.4
+
+      - name: Render setup shell screens
+        run: node scripts/test-windows-setup-shell.cjs --shell release/.setup-shell/NetcattySetup.exe --screens --dump --out release/.setup-shell/screens
+
+      - name: Upload setup shell screens
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: setup-shell-screens
+          path: release/.setup-shell/screens/*
+          if-no-files-found: ignore
+          retention-days: 7
+
   windows-broadcast-ssh:
     name: windows-broadcast-ssh
     runs-on: windows-latest
