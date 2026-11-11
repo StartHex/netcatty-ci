@@ -18,6 +18,7 @@
 //   --log <file>        append progress lines to a file
 //   --selftest <dir>    render every screen to PNG files and exit
 //   --lang <culture>    force the language, e.g. zh-CN (default: system language)
+//   --all-users         preselect "install for all users"
 
 using System;
 using System.Collections.Generic;
@@ -49,6 +50,7 @@ namespace NetcattySetup
         public string LogFile;
         public string SelfTestDir;
         public string Lang;
+        public bool AllUsers;
     }
 
     internal static class Log
@@ -204,6 +206,8 @@ namespace NetcattySetup
         public static string Classic { get { return Pick("Use the classic installer", "使用经典安装程序", "使用傳統安裝程式"); } }
         public static string ChooseFolder { get { return Pick("Choose where to install Netcatty", "选择 Netcatty 的安装位置", "選擇 Netcatty 的安裝位置"); } }
         public static string NoPayload { get { return Pick("This setup file is incomplete. Download it again.", "安装文件不完整，请重新下载。", "安裝檔不完整，請重新下載。"); } }
+        public static string ScopeMe { get { return Pick("Only for me", "仅为我安装", "僅為我安裝"); } }
+        public static string ScopeAll { get { return Pick("For all users (administrator)", "为所有用户安装（需管理员权限）", "為所有使用者安裝（需系統管理員權限）"); } }
         public static string Cancelled { get { return Pick("Administrator permission was not given, so nothing was installed.", "没有获得管理员权限，未进行安装。", "沒有取得系統管理員權限，未進行安裝。"); } }
         public static string LogAt { get { return Pick("Details: {0}", "详细日志：{0}", "詳細記錄：{0}"); } }
         public static string NotWritable { get { return Pick("Cannot write to this folder. Choose another one, or use the classic installer.", "无法写入这个文件夹。请换一个位置，或使用经典安装程序。", "無法寫入這個資料夾。請換一個位置，或使用傳統安裝程式。"); } }
@@ -384,6 +388,14 @@ namespace NetcattySetup
             }
         }
 
+        /// <summary>Where an all-users install goes by default.</summary>
+        public static string MachineDefaultFor(string productName)
+        {
+            string programFiles = Environment.GetEnvironmentVariable("ProgramW6432");
+            if (string.IsNullOrEmpty(programFiles)) programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            return System.IO.Path.Combine(programFiles, productName);
+        }
+
         public static string DefaultFor(string productName)
         {
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -536,6 +548,10 @@ namespace NetcattySetup
 
         private string installDir;
         private bool dirChosenByUser;
+        /// <summary>Install for every account on this PC rather than just this one.</summary>
+        private bool allUsersChoice;
+        private Border scopeMe;
+        private Border scopeAll;
         private bool installing;
         private bool blurOn;
         private Screen screen = Screen.Welcome;
@@ -563,7 +579,12 @@ namespace NetcattySetup
             productName = payload.Get("productName", "Netcatty");
             exeName = payload.Get("exeName", productName + ".exe");
             existingDir = InstallLocator.FindExisting(productName, out existingIsMachine);
-            installDir = !string.IsNullOrEmpty(options.Dir) ? options.Dir : (existingDir ?? InstallLocator.DefaultFor(productName));
+            // An existing copy decides the scope: replacing it in the other
+            // scope would leave two installs behind.
+            allUsersChoice = existingDir != null ? existingIsMachine : options.AllUsers;
+            installDir = !string.IsNullOrEmpty(options.Dir)
+                ? options.Dir
+                : (existingDir ?? (allUsersChoice ? InstallLocator.MachineDefaultFor(productName) : InstallLocator.DefaultFor(productName)));
             dirChosenByUser = !string.IsNullOrEmpty(options.Dir);
 
             Title = Strings.WindowTitle;
@@ -794,12 +815,86 @@ namespace NetcattySetup
 
             welcomePanel.Children.Add(pathRow);
 
+            // Same choice the classic wizard opens with.
+            StackPanel scope = new StackPanel();
+            scope.Orientation = Orientation.Horizontal;
+            scope.HorizontalAlignment = HorizontalAlignment.Center;
+            scope.Margin = new Thickness(0, 10, 0, 0);
+            scopeMe = BuildScopeOption(Strings.ScopeMe, false);
+            scopeAll = BuildScopeOption(Strings.ScopeAll, true);
+            scopeAll.Margin = new Thickness(8, 0, 0, 0);
+            scope.Children.Add(scopeMe);
+            scope.Children.Add(scopeAll);
+            welcomePanel.Children.Add(scope);
+            PaintScope();
+
             installButton = new FlatButton(existingDir != null ? Strings.Update : Strings.Install, true);
             installButton.Width = 220;
             installButton.HorizontalAlignment = HorizontalAlignment.Center;
-            installButton.Margin = new Thickness(0, 26, 0, 0);
+            installButton.Margin = new Thickness(0, 16, 0, 0);
             installButton.Click += delegate { StartInstall(false); };
             welcomePanel.Children.Add(installButton);
+        }
+
+        private Border BuildScopeOption(string text, bool allUsers)
+        {
+            Border option = new Border();
+            option.Height = 26;
+            option.CornerRadius = new CornerRadius(13);
+            option.Padding = new Thickness(12, 0, 12, 0);
+            option.BorderThickness = new Thickness(1);
+            option.SnapsToDevicePixels = true;
+            StackPanel row = new StackPanel();
+            row.Orientation = Orientation.Horizontal;
+            row.VerticalAlignment = VerticalAlignment.Center;
+            Ellipse dot = new Ellipse();
+            dot.Width = 8;
+            dot.Height = 8;
+            dot.Margin = new Thickness(0, 0, 7, 0);
+            dot.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock label = new TextBlock();
+            label.Text = text;
+            label.FontSize = 12;
+            label.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(dot);
+            row.Children.Add(label);
+            option.Child = row;
+            // The scope of an existing copy cannot be changed from here.
+            bool locked = existingDir != null;
+            if (!locked) option.Cursor = Cursors.Hand;
+            option.MouseLeftButtonDown += delegate(object sender, MouseButtonEventArgs e) { e.Handled = true; };
+            option.MouseLeftButtonUp += delegate(object sender, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (locked || allUsersChoice == allUsers) return;
+                allUsersChoice = allUsers;
+                if (!dirChosenByUser)
+                {
+                    installDir = allUsers ? InstallLocator.MachineDefaultFor(productName) : InstallLocator.DefaultFor(productName);
+                    ShowInstallDir();
+                }
+                PaintScope();
+            };
+            return option;
+        }
+
+        private void PaintScope()
+        {
+            foreach (Border option in new Border[] { scopeMe, scopeAll })
+            {
+                bool selected = (option == scopeAll) == allUsersChoice;
+                bool locked = existingDir != null;
+                StackPanel row = (StackPanel)option.Child;
+                Ellipse dot = (Ellipse)row.Children[0];
+                TextBlock label = (TextBlock)row.Children[1];
+                option.Background = new SolidColorBrush(Color.FromArgb(selected ? (byte)0x24 : (byte)0x00, 0xFF, 0xFF, 0xFF));
+                option.BorderBrush = new SolidColorBrush(Color.FromArgb(selected ? (byte)0x47 : (byte)0x1F, 0xFF, 0xFF, 0xFF));
+                dot.Fill = new SolidColorBrush(selected ? Color.FromRgb(0xFF, 0xFF, 0xFF) : Color.FromArgb(0x00, 0, 0, 0));
+                dot.Stroke = new SolidColorBrush(Color.FromArgb(selected ? (byte)0xFF : (byte)0x66, 0xFF, 0xFF, 0xFF));
+                dot.StrokeThickness = 1;
+                label.Foreground = new SolidColorBrush(Color.FromArgb(selected ? (byte)0xF2 : (byte)0x8C, 0xFF, 0xFF, 0xFF));
+                option.Opacity = locked && !selected ? 0.45 : 1.0;
+            }
         }
 
         private void BuildInstalling()
@@ -1040,7 +1135,7 @@ namespace NetcattySetup
             bool passDir = dirChosenByUser && !string.Equals(installDir, existingDir, StringComparison.OrdinalIgnoreCase);
             // A copy installed for all users, or a folder this account cannot
             // write to (Program Files), is an all-users install.
-            bool allUsers = passDir ? !InstallLocator.CanWrite(installDir) : existingIsMachine;
+            bool allUsers = allUsersChoice || (passDir && !InstallLocator.CanWrite(installDir));
             installing = true;
             exitCode = 0;
             ShowScreen(Screen.Installing);
@@ -1321,6 +1416,7 @@ namespace NetcattySetup
                 else if (arg == "--log" && next != null) { options.LogFile = next; index += 1; }
                 else if (arg == "--selftest" && next != null) { options.SelfTestDir = next; index += 1; }
                 else if (arg == "--lang" && next != null) { options.Lang = next; index += 1; }
+                else if (arg == "--all-users") options.AllUsers = true;
             }
             // Always keep a log: when an install fails on someone's machine it
             // is the only record of what the installer did.
