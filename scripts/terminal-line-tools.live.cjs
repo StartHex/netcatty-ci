@@ -260,12 +260,19 @@ async function main() {
     await key(mainCdp, 'Enter');
     await until('line 120 on screen', async () => (await gutterNumbers(cdp)).includes(120), 5000);
     assert.ok(!(await gutterNumbers(cdp)).includes(402), 'the view left the bottom');
+    await screenshot(cdp, 'go-to-line');
 
     // Copy a range typed into the same box.
     await cdp.eval(`(() => {const e=document.querySelector('[data-terminal-line-input]');e.focus();e.select();})()`);
     await insertText(mainCdp, '120-125');
-    await key(mainCdp, 'Enter', process.platform === 'darwin' ? ['meta'] : ['control']);
+    await until('range typed', () => cdp.eval(`document.querySelector('[data-terminal-line-input]')?.value === '120-125'`), 3000);
+    await clickElement(cdp, `${PANEL} button[aria-label^="Copy these lines"]`);
     await until('range on clipboard', async () => (await clipboardText(mainCdp)) === outLines(119, 124), 5000);
+    // The same through the keyboard.
+    await cdp.eval(`(() => {const e=document.querySelector('[data-terminal-line-input]');e.focus();e.select();})()`);
+    await insertText(mainCdp, '130-131');
+    await key(mainCdp, 'Enter', process.platform === 'darwin' ? ['meta'] : ['control']);
+    await until('keyboard range on clipboard', async () => (await clipboardText(mainCdp)) === outLines(129, 130), 5000);
 
     // Mark three lines by clicking their numbers.
     const visible = await gutterNumbers(cdp);

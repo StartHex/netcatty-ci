@@ -8,6 +8,7 @@ import type { RefObject } from 'react';
 import type { Terminal as XTerm } from '@xterm/xterm';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
+import { useClipboardBackend } from '../../application/state/useClipboardBackend';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import {
   getTerminalLineTools,
@@ -53,6 +54,7 @@ export const TerminalLinePanel: React.FC<TerminalLinePanelProps> = ({
   onNotify,
 }) => {
   const { t } = useI18n();
+  const { writeClipboardText } = useClipboardBackend();
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState('');
   const [marks, setMarks] = useState<TerminalLineMark[]>([]);
@@ -109,7 +111,11 @@ export const TerminalLinePanel: React.FC<TerminalLinePanelProps> = ({
       return;
     }
     try {
-      await navigator.clipboard.writeText(read.text);
+      // The system clipboard through the main process first: the browser
+      // clipboard refuses to write while the window is not focused.
+      let written = false;
+      try { written = await writeClipboardText(read.text); } catch { /* Use the browser clipboard. */ }
+      if (!written) await navigator.clipboard.writeText(read.text);
       onNotify({
         kind: 'success',
         message: t(read.clamped ? 'terminal.lines.copy.doneClamped' : 'terminal.lines.copy.done', {
@@ -121,7 +127,7 @@ export const TerminalLinePanel: React.FC<TerminalLinePanelProps> = ({
     } catch {
       onNotify({ kind: 'error', message: t('terminal.lines.copy.failed') });
     }
-  }, [onNotify, t, termRef]);
+  }, [onNotify, t, termRef, writeClipboardText]);
 
   const copyTyped = useCallback(() => {
     if (!parsed) return;
