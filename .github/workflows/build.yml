@@ -314,7 +314,12 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: a check build carries the upstream base and its commit
+            # (1.1.90-fork-sha-abc1234) instead of 0.0.0, so Settings shows
+            # what it is and the update check treats it as a fork build that
+            # is older than every published <base>-fork.<n> release.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
@@ -355,6 +360,19 @@ jobs:
         env:
           NETCATTY_TRAY_LAYOUT_SCALE: "2"
         run: npm run test:tray-panel-layout
+
+      # Fork: the Windows installer in this artifact gets the same setup window
+      # as the published fork builds, so a build downloaded from a pull
+      # request check does not open the stock NSIS wizard.
+      - name: Wrap the Windows installer in the setup window
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          node scripts/build-windows-setup-shell.cjs
+          shell_exe="$(find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' | head -n 1)"
+          test -n "$shell_exe"
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
+          mv -f "$shell_exe" "release/$(basename "$shell_exe")"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -608,7 +626,9 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: same check-build version as the matrix job.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
@@ -761,7 +781,9 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: same check-build version as the matrix job.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
