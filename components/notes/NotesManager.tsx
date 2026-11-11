@@ -1108,6 +1108,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   }, [
     isSidebarMode,
     commitNotes,
+    noteArea,
     flushNoteDraft,
     selectedGroup,
     selectedNote,
