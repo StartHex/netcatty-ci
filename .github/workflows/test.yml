@@ -150,7 +150,7 @@ jobs:
         run: node scripts/build-windows-setup-shell.cjs --stub-only --version 1.2.3-fork.4
 
       - name: Render setup shell screens
-        run: node scripts/test-windows-setup-shell.cjs --shell release/.setup-shell/NetcattySetup.exe --screens --dump --out release/.setup-shell/screens
+        run: node scripts/test-windows-setup-shell.cjs --shell release/.setup-shell/NetcattySetup.exe --screens --dump --lang zh-CN --out release/.setup-shell/screens
 
       - name: Upload setup shell screens
         if: always()

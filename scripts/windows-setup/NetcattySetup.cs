@@ -17,6 +17,7 @@
 //   --auto              install without waiting for a click, exit when done
 //   --log <file>        append progress lines to a file
 //   --selftest <dir>    render every screen to PNG files and exit
+//   --lang <culture>    force the language, e.g. zh-CN (default: system language)
 
 using System;
 using System.Collections.Generic;
@@ -47,6 +48,7 @@ namespace NetcattySetup
         public bool Auto;
         public string LogFile;
         public string SelfTestDir;
+        public string Lang;
     }
 
     internal static class Log
@@ -160,11 +162,17 @@ namespace NetcattySetup
 
     internal static class Strings
     {
-        private static readonly int Lang = Detect();
+        private static int Lang = Detect(CultureInfo.CurrentUICulture.Name);
 
-        private static int Detect()
+        /// <summary>Overrides the language picked from the system (used by the screen renders).</summary>
+        public static void Use(string cultureName)
         {
-            string name = CultureInfo.CurrentUICulture.Name.ToLowerInvariant();
+            Lang = Detect(cultureName);
+        }
+
+        private static int Detect(string cultureName)
+        {
+            string name = (cultureName ?? "").ToLowerInvariant();
             if (name.StartsWith("zh"))
             {
                 if (name.Contains("hant") || name.EndsWith("-tw") || name.EndsWith("-hk") || name.EndsWith("-mo")) return 2;
@@ -610,6 +618,7 @@ namespace NetcattySetup
             chrome.SnapsToDevicePixels = true;
 
             Grid root = new Grid();
+            root.ClipToBounds = true;
             chrome.Child = root;
 
             // A soft glow behind the icon gives the glass some depth.
@@ -744,8 +753,7 @@ namespace NetcattySetup
             pathText.Foreground = new SolidColorBrush(Color.FromArgb(0xE6, 0xFF, 0xFF, 0xFF));
             pathText.VerticalAlignment = VerticalAlignment.Center;
             pathText.TextTrimming = TextTrimming.CharacterEllipsis;
-            pathText.Text = installDir;
-            pathText.ToolTip = installDir;
+            ShowInstallDir();
             dock.Children.Add(pathText);
 
             welcomePanel.Children.Add(pathRow);
@@ -924,9 +932,30 @@ namespace NetcattySetup
                 }
                 installDir = chosen;
                 dirChosenByUser = true;
-                pathText.Text = installDir;
-                pathText.ToolTip = installDir;
+                ShowInstallDir();
             }
+        }
+
+        /// <summary>
+        /// Long paths are shortened in the middle: the drive and the last folders
+        /// say where the app goes, the user profile part in between does not.
+        /// </summary>
+        internal static string ShortenPath(string path, int max)
+        {
+            if (string.IsNullOrEmpty(path) || path.Length <= max) return path;
+            int head = Math.Min(path.Length, Math.Max(3, max / 4));
+            int separator = path.LastIndexOf('\\', head - 1);
+            if (separator >= 2) head = separator + 1;
+            int tail = max - head - 1;
+            int cut = path.IndexOf('\\', path.Length - tail);
+            if (cut > 0 && cut < path.Length - 1) tail = path.Length - cut;
+            return path.Substring(0, head) + "\u2026" + path.Substring(path.Length - tail);
+        }
+
+        private void ShowInstallDir()
+        {
+            pathText.Text = ShortenPath(installDir, 44);
+            pathText.ToolTip = installDir;
         }
 
         private void SetProgress(double fraction, string status)
@@ -1112,16 +1141,15 @@ namespace NetcattySetup
                 // The real screen shows what the system compositor does with the
                 // blur; the renders show the layout even on a headless session.
                 Thread.Sleep(600);
-                CaptureScreen(System.IO.Path.Combine(options.SelfTestDir, "screen-welcome.png"));
-                RenderTo("welcome.png");
+                Shoot("welcome");
                 ShowScreen(Screen.Installing);
                 SetProgress(0.42, Strings.Installing);
-                RenderTo("installing.png");
+                Shoot("installing");
                 ShowScreen(Screen.Done);
-                RenderTo("done.png");
+                Shoot("done");
                 failedDetail.Text = string.Format(CultureInfo.CurrentCulture, Strings.ExitCode, 2);
                 ShowScreen(Screen.Failed);
-                RenderTo("failed.png");
+                Shoot("failed");
                 exitCode = 0;
             }
             catch (Exception error)
@@ -1130,6 +1158,13 @@ namespace NetcattySetup
                 exitCode = 3;
             }
             Close();
+        }
+
+        private void Shoot(string name)
+        {
+            RenderTo(name + ".png");
+            Thread.Sleep(150);
+            CaptureScreen(System.IO.Path.Combine(options.SelfTestDir, "screen-" + name + ".png"));
         }
 
         private void Flush()
@@ -1151,7 +1186,11 @@ namespace NetcattySetup
                 context.DrawRectangle(wallpaper, null, new Rect(0, 0, width, height));
                 // What the system blur adds on a real desktop.
                 context.DrawRectangle(new SolidColorBrush(Color.FromArgb(0x8C, 0, 0, 0)), null, new Rect(0, 0, width, height));
-                context.DrawRectangle(new VisualBrush(chrome), null, new Rect(0, 0, width, height));
+                VisualBrush window = new VisualBrush(chrome);
+                window.Stretch = Stretch.None;
+                window.ViewboxUnits = BrushMappingMode.Absolute;
+                window.Viewbox = new Rect(0, 0, width, height);
+                context.DrawRectangle(window, null, new Rect(0, 0, width, height));
             }
             RenderTargetBitmap bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
             bitmap.Render(visual);
@@ -1207,8 +1246,10 @@ namespace NetcattySetup
                 else if (arg == "--dir" && next != null) { options.Dir = next.TrimEnd('\\'); index += 1; }
                 else if (arg == "--log" && next != null) { options.LogFile = next; index += 1; }
                 else if (arg == "--selftest" && next != null) { options.SelfTestDir = next; index += 1; }
+                else if (arg == "--lang" && next != null) { options.Lang = next; index += 1; }
             }
             Log.File = options.LogFile;
+            if (options.Lang != null) Strings.Use(options.Lang);
             Log.Write("setup shell started");
             try
             {

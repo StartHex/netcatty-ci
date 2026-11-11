@@ -19,7 +19,7 @@ function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index].replace(/^--/, "");
-    if (key === "shell" || key === "out") options[key] = argv[++index];
+    if (key === "shell" || key === "out" || key === "lang") options[key] = argv[++index];
     else options[key] = true;
   }
   return options;
@@ -40,7 +40,8 @@ function screens(shell, options) {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
   const log = path.join(outDir, "selftest.log");
-  const status = runShell(shell, ["--selftest", outDir, "--log", log], 120_000);
+  const langArgs = options.lang ? ["--lang", options.lang] : [];
+  const status = runShell(shell, ["--selftest", outDir, "--log", log, ...langArgs], 120_000);
   printLog(log);
   if (status !== 0) throw new Error(`self test exited with ${status}`);
   for (const name of ["welcome.png", "installing.png", "done.png", "failed.png"]) {
@@ -50,7 +51,11 @@ function screens(shell, options) {
     console.log(`${name}: ${size} bytes`);
   }
   if (options.dump) {
-    for (const name of fs.readdirSync(outDir).filter((file) => file.endsWith(".png"))) {
+    // The screen captures show what the compositor really draws; the off-screen
+    // renders are only needed where there is no desktop to capture.
+    const all = fs.readdirSync(outDir).filter((file) => file.endsWith(".png"));
+    const captured = all.filter((file) => file.startsWith("screen-"));
+    for (const name of captured.length > 0 ? captured : all) {
       console.log(`-----BEGIN ${name}-----`);
       console.log(fs.readFileSync(path.join(outDir, name)).toString("base64").replace(/(.{120})/g, "$1\n"));
       console.log(`-----END ${name}-----`);
