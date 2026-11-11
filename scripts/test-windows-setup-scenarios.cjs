@@ -21,6 +21,9 @@ const installDir = path.join(process.env.LOCALAPPDATA || "", "Programs", "Netcat
 const appExe = path.join(installDir, "Netcatty.exe");
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-setup-scenarios-"));
 
+const machineDir = path.join(process.env.ProgramFiles || "C:\\Program Files", "Netcatty");
+const { readTrailer } = require("./build-windows-setup-shell.cjs");
+
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function powershell(script, timeout = 60_000) {
@@ -66,7 +69,28 @@ function installedVersion() {
   return powershell(`(Get-Item '${appExe.replace(/'/g, "''")}').VersionInfo.ProductVersion`);
 }
 
-async function autoStep(shell, name) {
+/** Copies the NSIS installer out of the shell, the way the shell does at run time. */
+function extractInstaller(shell) {
+  const trailer = readTrailer(shell);
+  if (!trailer) throw new Error("the shell has no installer attached");
+  const target = path.join(workDir, "Netcatty-Installer.exe");
+  const input = fs.openSync(shell, "r");
+  const output = fs.openSync(target, "w");
+  const buffer = Buffer.alloc(4 << 20);
+  let left = trailer.payloadLength;
+  let position = trailer.payloadOffset;
+  while (left > 0) {
+    const read = fs.readSync(input, buffer, 0, Math.min(buffer.length, left), position);
+    fs.writeSync(output, buffer, 0, read);
+    left -= read;
+    position += read;
+  }
+  fs.closeSync(input);
+  fs.closeSync(output);
+  return target;
+}
+
+async function autoStep(shell, name, expectedExe = appExe) {
   const log = path.join(workDir, `${name}.log`);
   const started = Date.now();
   const { child, status } = await runShell(shell, ["--auto", "--log", log]);
@@ -77,9 +101,12 @@ async function autoStep(shell, name) {
     killTree(child.pid);
     throw new Error(`${name}: still running after ${seconds}s`);
   }
-  if (status !== 0) throw new Error(`${name}: exited with ${status} after ${seconds}s`);
-  if (!fs.existsSync(appExe)) throw new Error(`${name}: ${appExe} is missing`);
-  console.log(`PASS ${name}: ${seconds}s, installed version ${installedVersion()}`);
+  if (status !== 0) {
+    diagnostics(name);
+    throw new Error(`${name}: exited with ${status} after ${seconds}s`);
+  }
+  if (!fs.existsSync(expectedExe)) throw new Error(`${name}: ${expectedExe} is missing`);
+  console.log(`PASS ${name}: ${seconds}s, ${expectedExe}`);
 }
 
 const CLICK_HELPER = `
@@ -95,7 +122,7 @@ public class NcWin {
   public struct RECT { public int L, T, R, B; }
 }
 "@
-$h = [NcWin]::FindWindow($null, 'Netcatty Setup')
+$h = [NcWin]::FindWindow([NullString]::Value, 'Netcatty Setup')
 if ($h -eq [IntPtr]::Zero) { Write-Output 'no-window'; exit }
 [NcWin]::SetForegroundWindow($h) | Out-Null
 $r = New-Object NcWin+RECT
@@ -139,6 +166,14 @@ async function clickStep(shell) {
   }
 }
 
+function uninstallFrom(dir) {
+  if (!fs.existsSync(dir)) return;
+  const uninstaller = fs.readdirSync(dir).find((file) => /^Uninstall .*\.exe$/i.test(file));
+  if (!uninstaller) return;
+  const result = spawnSync(path.join(dir, uninstaller), ["/S", `_?=${dir}`], { timeout: 300_000, windowsVerbatimArguments: true });
+  console.log(`uninstall from ${dir} exited with ${result.status}`);
+}
+
 async function main() {
   const index = process.argv.indexOf("--shell");
   if (process.platform !== "win32" || index === -1) throw new Error("usage (Windows): --shell <exe>");
@@ -156,12 +191,17 @@ async function main() {
   await autoStep(shell, "running");
 
   await clickStep(shell);
+  uninstallFrom(installDir);
 
-  const uninstaller = fs.readdirSync(installDir).find((file) => /^Uninstall .*\.exe$/i.test(file));
-  if (uninstaller) {
-    spawnSync(path.join(installDir, uninstaller), ["/S", `_?=${installDir}`], { timeout: 300_000, windowsVerbatimArguments: true });
-  }
-  console.log("PASS: fresh install, upgrade, upgrade while running, and a real click");
+  // A copy installed for all users (Program Files), then updated by the shell.
+  const installer = extractInstaller(shell);
+  const classic = spawnSync(installer, ["/S", "/allusers"], { timeout: STEP_LIMIT_MS });
+  console.log(`classic all-users install exited with ${classic.status}; ${machineDir} ${fs.existsSync(path.join(machineDir, "Netcatty.exe")) ? "has" : "lacks"} Netcatty.exe`);
+  console.log(powershell("Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Netcatty*' } | Select-Object PSPath,DisplayName,InstallLocation,UninstallString | Format-List"));
+  if (!fs.existsSync(path.join(machineDir, "Netcatty.exe"))) throw new Error("all-users install did not land in Program Files");
+  await autoStep(shell, "machine-upgrade", path.join(machineDir, "Netcatty.exe"));
+  uninstallFrom(machineDir);
+  console.log("PASS: fresh install, upgrade, upgrade while running, a real click, and an all-users upgrade");
 }
 
 main().catch((error) => {
