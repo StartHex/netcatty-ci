@@ -791,6 +791,69 @@ export const escapeStrayAngleBrackets = (markdown: string): string => {
   });
 };
 
+const MD_BLOCK_START_RE =
+  /^ {0,3}(?:#{1,6}(?:\s|$)|(?:[-+*]|\d+[.)])\s|>|```|~~~|\||<[a-zA-Z/!]|(?:[-*_]\s*){3,}$|=+\s*$)/;
+const MD_NO_BREAK_AFTER_RE = /^ {0,3}(?:#{1,6}(?:\s|$)|```|~~~|\||<[a-zA-Z/!]|(?:[-*_]\s*){3,}$)/;
+const MD_QUOTE_LINE_RE = /^ {0,3}>/;
+
+/**
+ * Keep the line breaks of pasted text that is being inserted as markdown.
+ *
+ * In markdown a single newline inside a paragraph is only a soft break: the
+ * lines are joined when rendered, so a pasted address block, log excerpt or
+ * meeting note came out as one run-on paragraph. Each newline between two
+ * text lines becomes a hard break (two trailing spaces). Block structure —
+ * headings, list items, tables, quotes markers, fences, HTML — is left alone,
+ * and code is never touched.
+ */
+export const preserveMarkdownLineBreaks = (markdown: string): string => {
+  if (!markdown.includes("\n")) return markdown;
+  const { text, slots, sentinel } = maskCodeRegions(markdown);
+  // A line that is nothing but a masked fenced / indented block is a block of
+  // its own, not paragraph text (inline code spans are masked too, in place).
+  const blockPlaceholder = new RegExp(String.raw`^\s*${escapeRegExp(sentinel)}(\d+)@@\s*$`);
+  const isCodeBlockLine = (line: string): boolean => {
+    const match = blockPlaceholder.exec(line);
+    if (!match) return false;
+    const slot = slots[Number(match[1])] ?? "";
+    return slot.includes("\n") || /^\s*(?:```|~~~)/.test(slot) || /^(?: {4}|\t)/.test(slot);
+  };
+  const withBreaks = ((plain: string) => {
+    const lines = plain.split("\n");
+    for (let index = 0; index < lines.length - 1; index += 1) {
+      const line = lines[index];
+      const next = lines[index + 1];
+      if (!line.trim() || !next.trim()) continue;
+      if (isCodeBlockLine(line) || isCodeBlockLine(next)) continue;
+      if (/(?: {2,}|\\)$/.test(line)) continue;
+      if (MD_NO_BREAK_AFTER_RE.test(line)) continue;
+      const bothQuoted = MD_QUOTE_LINE_RE.test(line) && MD_QUOTE_LINE_RE.test(next);
+      if (!bothQuoted && MD_BLOCK_START_RE.test(next)) continue;
+      // Indented continuation (nested list content, indented code) keeps its shape.
+      if (/^(?: {4,}|\t)/.test(next) && !/^(?: {4,}|\t)/.test(line)) continue;
+      lines[index] = `${line.replace(/\s+$/, "")}  `;
+    }
+    return lines.join("\n");
+  })(text);
+  return unmaskCodeRegions(withBreaks, slots, sentinel);
+};
+
+const countTextLines = (value: string): number => (
+  value.split("\n").filter((line) => line.trim() !== "").length
+);
+
+/**
+ * True when an HTML → markdown conversion flattened the document: text/plain
+ * has clearly more lines than the conversion kept. Happens with sources that
+ * lay text out with `white-space: pre-wrap` and real newlines (chat apps,
+ * online docs, terminals) — HTML whitespace rules fold those newlines away.
+ */
+export const conversionLostLineBreaks = (plain: string, converted: string): boolean => {
+  const plainLines = countTextLines(plain);
+  if (plainLines < 2) return false;
+  return countTextLines(converted) < Math.ceil(plainLines * 0.6);
+};
+
 /** Undo markdown backslash escapes, to compare converted text with its source. */
 const unescapeMarkdownPunctuation = (value: string): string => (
   value.replace(/\\([!-/:-@[-`{-~])/g, "$1")
@@ -984,7 +1047,7 @@ export const resolveNoteClipboardPaste = (input: {
         return asMarkdown(converted, plainMarkdownContainsHtml(converted) ? "markdown" : "html-converted");
       }
     }
-    return asMarkdown(normalizePastedNoteMarkdown(plain), "markdown");
+    return asMarkdown(preserveMarkdownLineBreaks(normalizePastedNoteMarkdown(plain)), "markdown");
   }
 
   // 2) Rich HTML document (browser / Word / GitHub render clipboard)
@@ -993,6 +1056,9 @@ export const resolveNoteClipboardPaste = (input: {
     const converted = convertClipboardHtmlToMarkdown(html);
     if (converted.trim()) {
       if (addsNothingToPlain(converted)) return { text: plain, kind: "plain" };
+      // The source drew its lines with CSS, not markup: the plain text is the
+      // only copy that still has them. Lines matter more than inline styling.
+      if (conversionLostLineBreaks(plain, converted)) return { text: plain, kind: "plain" };
       return asMarkdown(converted, "html-converted");
     }
   }
@@ -1014,6 +1080,35 @@ export const resolveNoteClipboardPaste = (input: {
 
   return { text: "", kind: "empty" };
 };
+
+/**
+ * Split plain text into paragraphs (blank-line separated) of lines, the shape
+ * the editor inserts it in: one paragraph per block, a hard break per line.
+ */
+export const splitPlainTextForNoteInsert = (text: string): string[][] => (
+  text
+    .replace(/\r\n?/g, "\n")
+    .replace(/^\n+|\n+$/g, "")
+    .split(/\n{2,}/)
+    .map((block) => block.split("\n"))
+    .filter((lines) => lines.some((line) => line !== ""))
+);
+
+/**
+ * Multi-line plain text is inserted by us (paragraphs + hard breaks) instead
+ * of by the editor's default paste, which reads the clipboard's HTML flavour
+ * first and can fold the newlines away.
+ */
+export const shouldInsertPlainNotePasteWithLineBreaks = (input: {
+  editorMode: "edit" | "preview" | "source" | "live" | string;
+  pasteInsideCodeBlock: boolean;
+  payload: NoteClipboardPastePayload;
+}): boolean => (
+  input.editorMode === "edit"
+  && !input.pasteInsideCodeBlock
+  && input.payload.kind === "plain"
+  && /\n/.test(input.payload.text.replace(/\r\n?/g, "\n").replace(/^\n+|\n+$/g, ""))
+);
 
 export const shouldInterceptResolvedNotePaste = (input: {
   editorMode: "edit" | "preview" | "source" | "live" | string;

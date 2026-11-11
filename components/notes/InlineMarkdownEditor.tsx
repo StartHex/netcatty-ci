@@ -59,7 +59,9 @@ import {
   normalizeNotePublicAssetPaths,
   resolveNoteClipboardPaste,
   shouldInsertClipboardTextAsMarkdown,
+  shouldInsertPlainNotePasteWithLineBreaks,
   shouldInterceptResolvedNotePaste,
+  splitPlainTextForNoteInsert,
 } from "./noteClipboardPaste";
 import { annotateNoteImageSizes } from "./noteImageLayout";
 import { renderNoteMathFormula } from "./noteMathRenderer";
@@ -427,6 +429,47 @@ export const insertClipboardTextAtActiveLexicalSelection = (
     const selection = $getSelection();
     if (!$isRangeSelection(selection)) return;
     selection.insertText(text);
+    didInsert = true;
+  });
+  return didInsert;
+};
+
+/**
+ * Insert multi-line plain text at the caret as real structure: one paragraph
+ * per blank-line separated block and a hard line break per line, so the lines
+ * survive both on screen and in the saved markdown. Returns false (nothing
+ * inserted) when there is no range selection to insert at.
+ */
+export const insertPlainTextWithLineBreaksAtActiveLexicalSelection = (
+  target: EventTarget | null,
+  text: string,
+): boolean => {
+  const blocks = splitPlainTextForNoteInsert(text);
+  if (blocks.length === 0) return false;
+  if (typeof Element === "undefined" || typeof Node === "undefined") return false;
+  const element = target instanceof Element
+    ? target
+    : target instanceof Node
+      ? target.parentElement
+      : null;
+  if (!element) return false;
+  const lexicalEditor = getNearestEditorFromDOMNode(element);
+  if (!lexicalEditor) return false;
+  let didInsert = false;
+  lexicalEditor.update(() => {
+    if (!$isRangeSelection($getSelection())) return;
+    blocks.forEach((lines, blockIndex) => {
+      if (blockIndex > 0) {
+        const selection = $getSelection();
+        if ($isRangeSelection(selection)) selection.insertParagraph();
+      }
+      lines.forEach((line, lineIndex) => {
+        const selection = $getSelection();
+        if (!$isRangeSelection(selection)) return;
+        if (lineIndex > 0) selection.insertLineBreak();
+        if (line) selection.insertText(line);
+      });
+    });
     didInsert = true;
   });
   return didInsert;
@@ -1893,6 +1936,23 @@ export const InlineMarkdownEditor = React.memo(
     const editor = editorRef.current;
     const canInsertAtSelection = Boolean(editor)
       && hasActiveLexicalTextSelection(event.target);
+    // Multi-line plain text: insert it ourselves so every line break is kept.
+    // Left to the default paste, the clipboard's HTML flavour wins and its
+    // whitespace rules can fold the lines into one paragraph.
+    if (
+      canInsertAtSelection
+      && shouldInsertPlainNotePasteWithLineBreaks({
+        editorMode,
+        pasteInsideCodeBlock: isNotePasteInsideCodeBlock(event.target),
+        payload,
+      })
+      && insertPlainTextWithLineBreaksAtActiveLexicalSelection(event.target, payload.text)
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation?.();
+      return;
+    }
     if (
       !shouldInterceptResolvedNotePaste({
         editorMode,

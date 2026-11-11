@@ -29,5 +29,9 @@ export {
   extractBalancedHtmlElement,
   convertHtmlIslandsInMarkdown,
   resolveNoteClipboardPaste,
+  preserveMarkdownLineBreaks,
+  conversionLostLineBreaks,
+  splitPlainTextForNoteInsert,
+  shouldInsertPlainNotePasteWithLineBreaks,
   shouldInterceptResolvedNotePaste,
 } from "../../domain/notes/clipboardPaste";
