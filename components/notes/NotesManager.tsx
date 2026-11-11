@@ -848,7 +848,9 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     const note = sortedNotes.find((item) => item.id === openNoteId);
     if (!note) return;
     const nextSelection = getNoteSelectionState(note, isSidebarMode);
-    revealNoteArea(note);
+    // Show the area the note lives in, or the tree would not list it.
+    setNoteArea(getNoteArea(note));
+    if (isNoteOrganizedAway(note)) setShowOrganizedAway(true);
     setSelectedNoteId(nextSelection.selectedNoteId);
     setSelectedGroup(nextSelection.selectedGroup);
     setOverlayNoteId(nextSelection.overlayNoteId);
@@ -856,7 +858,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
       setExpandedGroups((current) => new Set([...current, ...ancestorNoteGroupPaths(note.group || "")]));
     }
     onOpenNoteIdHandled?.();
-  }, [isSidebarMode, onOpenNoteIdHandled, openNoteId, openNoteRequestId, revealNoteArea, sortedNotes]);
+  }, [isSidebarMode, onOpenNoteIdHandled, openNoteId, openNoteRequestId, sortedNotes]);
 
   useEffect(() => {
     if (expandedPanel !== "search") return;
@@ -1972,13 +1974,12 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div className="min-w-0 flex-shrink-0 overflow-hidden">
             <div className="flex min-w-0 items-center gap-1 border-b border-border/60 px-1.5 py-1" data-notes-area-switch>
-              <div className="flex min-w-0 flex-1 rounded-md bg-secondary/50 p-0.5" role="tablist" aria-label={t("notes.area.label")}>
+              <div className="flex min-w-0 flex-1 rounded-md bg-secondary/50 p-0.5" role="group" aria-label={t("notes.area.label")}>
                 {(["daily", "organized"] as const).map((area) => (
                   <button
                     key={area}
                     type="button"
-                    role="tab"
-                    aria-selected={noteArea === area}
+                    aria-pressed={noteArea === area}
                     data-notes-area={area}
                     className={cn(
                       "flex h-6 min-w-0 flex-1 items-center justify-center gap-1 rounded px-1.5 text-xs transition-colors",
