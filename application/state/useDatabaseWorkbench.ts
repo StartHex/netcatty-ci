@@ -1094,6 +1094,7 @@ export function useDatabaseWorkbench(
     );
   }, [connections]);
 
+  const saveDraftsRef = useRef<(() => void) | null>(null);
   // Publish tab summaries for the tab bar and persist drafts for restart restore.
   useEffect(() => {
     const summaries = tabs.map((tab) => ({
@@ -1105,17 +1106,36 @@ export function useDatabaseWorkbench(
       transactionOpen: tab.transactionOpen,
     }));
     databaseTabStore.sync(summaries, activeTabId);
-    databaseTabStore.saveDrafts(
-      tabs.map((tab) => ({
-        id: tab.id,
-        connectionId: tab.connectionId,
-        title: tab.title,
-        sql: tab.sql,
-        ...(tab.filePath ? { filePath: tab.filePath } : {}),
-      })),
-      activeTabId,
-    );
+    // Drafts are written shortly after typing stops, not on every keystroke:
+    // serializing every tab's SQL into storage is synchronous.
+    saveDraftsRef.current = () => {
+      saveDraftsRef.current = null;
+      databaseTabStore.saveDrafts(
+        tabs.map((tab) => ({
+          id: tab.id,
+          connectionId: tab.connectionId,
+          title: tab.title,
+          sql: tab.sql,
+          ...(tab.filePath ? { filePath: tab.filePath } : {}),
+        })),
+        activeTabId,
+      );
+    };
+    const timer = setTimeout(() => saveDraftsRef.current?.(), 400);
+    return () => clearTimeout(timer);
   }, [tabs, activeTabId]);
+
+  // Never lose the last edits: flush on unmount and when the window closes.
+  useEffect(() => {
+    const flush = () => saveDraftsRef.current?.();
+    window.addEventListener('beforeunload', flush);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, []);
 
   // Requests raised by the vault list / tab bar (open or close).
   const tabRequest = useDatabaseTabRequest();

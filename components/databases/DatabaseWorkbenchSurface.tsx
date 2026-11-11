@@ -34,7 +34,7 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { format as formatSqlText } from 'sql-formatter';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -401,14 +401,32 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     [autoWidths, savedWidths, tab.result],
   );
 
-  const sqlCompletionSource = useCallback(
+  // Built once per schema / structure / result change, not per keystroke: the
+  // editor asks for completions on every typed character, and sorting a few
+  // thousand table names each time made typing lag on large databases.
+  const structureColumns = tab.structure?.columns;
+  const resultColumns = tab.result?.columns;
+  const sqlCompletionEntries = useMemo(
     () =>
       buildSqlCompletionEntries({
         tables: tab.tables,
-        columns: tab.structure?.columns ?? [],
-        resultColumns: tab.result?.columns ?? [],
+        columns: structureColumns ?? [],
+        resultColumns: resultColumns ?? [],
       }),
-    [tab],
+    [tab.tables, structureColumns, resultColumns],
+  );
+  const sqlCompletionSource = useCallback(() => sqlCompletionEntries, [sqlCompletionEntries]);
+  // Stable callbacks so the memoized schema panel is not re-rendered by typing.
+  const tabId = tab.id;
+  const { refreshTables, previewTable, showStructure } = workbench;
+  const refreshSchema = useCallback(() => void refreshTables(tabId), [tabId, refreshTables]);
+  const previewSchemaTable = useCallback(
+    (table: DbTableRef) => void previewTable(tabId, table),
+    [tabId, previewTable],
+  );
+  const showSchemaStructure = useCallback(
+    (table: DbTableRef) => void showStructure(tabId, table),
+    [tabId, showStructure],
   );
 
   const pageSize = tab.maxRows || 1000;
@@ -894,11 +912,14 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
 
     <div className="flex min-h-0 min-w-0 flex-1">
       <SchemaPanel
-        tab={tab}
+        tabId={tab.id}
+        tables={tab.tables}
+        loading={Boolean(tab.tablesLoading)}
+        error={tab.tablesError}
         width={schemaWidth}
-        onRefresh={() => void workbench.refreshTables(tab.id)}
-        onPreview={(table) => void workbench.previewTable(tab.id, table)}
-        onShowStructure={(table) => void workbench.showStructure(tab.id, table)}
+        onRefresh={refreshSchema}
+        onPreview={previewSchemaTable}
+        onShowStructure={showSchemaStructure}
         t={t}
       />
       <div
@@ -1623,7 +1644,10 @@ const RowLimitControl: React.FC<{
 };
 
 interface SchemaPanelProps {
-  tab: DatabaseTab;
+  tabId: string;
+  tables: DatabaseTab['tables'];
+  loading: boolean;
+  error?: string;
   width: number;
   onRefresh: () => void;
   onPreview: (table: DbTableRef) => void;
@@ -1631,27 +1655,62 @@ interface SchemaPanelProps {
   t: ReturnType<typeof useI18n>['t'];
 }
 
-const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPreview, onShowStructure, t }) => {
+const SCHEMA_ROW_HEIGHT = 22;
+
+type SchemaListItem =
+  | { kind: 'schema'; key: string; schema: string; count: number }
+  | { kind: 'table'; key: string; table: DbTableRef };
+
+/**
+ * The table list of a connection. Memoized on the table list itself (not on
+ * the tab, which changes with every keystroke in the editor) and virtualized:
+ * a database with thousands of tables used to mount a row, two icons and a
+ * tooltip for each of them and re-render them all while typing SQL.
+ */
+const SchemaPanel = memo(function SchemaPanel({
+  tabId,
+  tables,
+  loading,
+  error,
+  width,
+  onRefresh,
+  onPreview,
+  onShowStructure,
+  t,
+}: SchemaPanelProps) {
   const [tableQuery, setTableQuery] = useState('');
   useEffect(() => {
     setTableQuery('');
-  }, [tab.id]);
-  const visibleTables = useMemo(() => filterTables(tab.tables ?? [], tableQuery), [tab.tables, tableQuery]);
-  const grouped = useMemo(() => {
-    const map = new Map<string, DbTableRef[]>();
+  }, [tabId]);
+  // Typing in the filter stays instant; the list catches up right after.
+  const deferredQuery = useDeferredValue(tableQuery);
+  const visibleTables = useMemo(() => filterTables(tables ?? [], deferredQuery), [tables, deferredQuery]);
+  const items = useMemo(() => {
+    const bySchema = new Map<string, DbTableRef[]>();
     for (const table of visibleTables) {
-      const list = map.get(table.schema) ?? [];
-      list.push(table);
-      map.set(table.schema, list);
+      const list = bySchema.get(table.schema);
+      if (list) list.push(table);
+      else bySchema.set(table.schema, [table]);
     }
-    return [...map.entries()];
+    const flat: SchemaListItem[] = [];
+    for (const [schema, list] of bySchema) {
+      if (bySchema.size > 1) flat.push({ kind: 'schema', key: `schema:${schema}`, schema, count: list.length });
+      for (const table of list) flat.push({ kind: 'table', key: `${table.schema}.${table.name}`, table });
+    }
+    return flat;
   }, [visibleTables]);
+  const previewLabel = t('databases.schema.preview');
 
   return (
     <div className="flex shrink-0 flex-col border-r border-border/60" style={{ width }}>
       <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-2 py-1">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span className="flex min-w-0 items-baseline gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           {t('databases.schema.title')}
+          {tables && tables.length > 0 ? (
+            <span className="font-normal tabular-nums opacity-70">
+              {visibleTables.length === tables.length ? tables.length : `${visibleTables.length} / ${tables.length}`}
+            </span>
+          ) : null}
         </span>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1659,10 +1718,10 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
               size="sm"
               variant="ghost"
               className="h-5 w-5 p-0"
-              disabled={tab.tablesLoading}
+              disabled={loading}
               onClick={onRefresh}
             >
-              <RotateCw className={cn('h-3 w-3', tab.tablesLoading && 'animate-spin')} />
+              <RotateCw className={cn('h-3 w-3', loading && 'animate-spin')} />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{t('databases.schema.refresh')}</TooltipContent>
@@ -1677,77 +1736,76 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
           onChange={setTableQuery}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-1">
-        {tab.tablesError ? (
-          <p className="nc-anim-fade-in px-1 py-2 text-[11px] text-destructive">{tab.tablesError}</p>
-        ) : grouped.length === 0 && tab.tablesLoading && !tableQuery.trim() ? (
+      <div className="flex min-h-0 flex-1 flex-col p-1">
+        {error ? (
+          <p className="nc-anim-fade-in px-1 py-2 text-[11px] text-destructive">{error}</p>
+        ) : items.length === 0 && loading && !tableQuery.trim() ? (
           <div className="space-y-1.5 px-1 py-1.5" aria-busy="true" aria-label={t('databases.schema.loading')}>
-            {[72, 56, 84, 64, 48, 76].map((width, index) => (
+            {[72, 56, 84, 64, 48, 76].map((barWidth, index) => (
               <div key={index} className="flex items-center gap-1.5">
                 <span className="h-3 w-3 shrink-0 animate-pulse rounded-sm bg-muted" />
                 <span
                   className="h-2.5 animate-pulse rounded-sm bg-muted"
-                  style={{ width: `${width}%`, animationDelay: `${index * 90}ms` }}
+                  style={{ width: `${barWidth}%`, animationDelay: `${index * 90}ms` }}
                 />
               </div>
             ))}
           </div>
-        ) : grouped.length === 0 ? (
+        ) : items.length === 0 ? (
           <p className="px-1 py-2 text-[11px] text-muted-foreground">
-            {tab.tablesLoading
+            {loading
               ? t('databases.schema.loading')
               : tableQuery.trim()
                 ? t('databases.schema.noMatches')
                 : t('databases.schema.empty')}
           </p>
         ) : (
-          grouped.map(([schema, tables]) => (
-            <div key={schema} className="nc-anim-fade-in mb-1">
-              {grouped.length > 1 ? (
-                <p className="px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
-                  {schema}
+          <FixedSizeVirtualList
+            items={items}
+            itemHeight={SCHEMA_ROW_HEIGHT}
+            overscan={12}
+            className="min-h-0 flex-1"
+            getItemKey={(item: SchemaListItem) => item.key}
+            renderItem={(item: SchemaListItem) =>
+              item.kind === 'schema' ? (
+                <p className="flex h-[22px] items-center gap-1.5 truncate px-1 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="truncate">{item.schema}</span>
+                  <span className="tabular-nums opacity-70">{item.count}</span>
                 </p>
-              ) : null}
-              {tables.map((table) => (
-                <div
-                  key={`${table.schema}.${table.name}`}
-                  className="group flex w-full items-center gap-1 rounded px-1 py-0.5 text-[11px] hover:bg-secondary"
-                >
+              ) : (
+                <div className="group flex h-[22px] w-full items-center gap-1 rounded px-1 text-[11px] hover:bg-secondary">
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 items-center gap-1 text-left"
-                    title={`${table.schema}.${table.name}`}
-                    onClick={() => onShowStructure(table)}
+                    title={`${item.table.schema}.${item.table.name}`}
+                    onClick={() => onShowStructure(item.table)}
                   >
-                    {table.type === 'view' ? (
+                    {item.table.type === 'view' ? (
                       <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
                     ) : (
                       <Table2 className="h-3 w-3 shrink-0 text-muted-foreground" />
                     )}
-                    <span className="truncate">{table.name}</span>
+                    <span className="truncate">{item.table.name}</span>
                   </button>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background group-hover:opacity-100"
-                        aria-label={t('databases.schema.preview')}
-                        onClick={() => onPreview(table)}
-                      >
-                        <Play className="h-3 w-3 text-muted-foreground" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t('databases.schema.preview')}</TooltipContent>
-                  </Tooltip>
+                  {/* Native title instead of a tooltip component per row. */}
+                  <button
+                    type="button"
+                    className="rounded p-0.5 opacity-0 hover:bg-background focus-visible:opacity-100 group-hover:opacity-100"
+                    aria-label={previewLabel}
+                    title={previewLabel}
+                    onClick={() => onPreview(item.table)}
+                  >
+                    <Play className="h-3 w-3 text-muted-foreground" />
+                  </button>
                 </div>
-              ))}
-            </div>
-          ))
+              )
+            }
+          />
         )}
       </div>
     </div>
   );
-};
+});
 
 interface StructurePanelProps {
   structure: NonNullable<DatabaseTab['structure']>;
