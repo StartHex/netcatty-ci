@@ -16,6 +16,7 @@ import {
   resolveDefaultKeyPassphraseAliases,
 } from '../defaultKeyPassphrases';
 import { getNotesActions, getNotesSnapshot, subscribeNotes } from './notesStore';
+import { readExternalMcpNotesAccess, readExternalMcpNotesMaskSecrets } from './useExternalMcpToggleState';
 import type {
   VaultGroupMutationResult,
   VaultGroupMutationState,
@@ -171,6 +172,12 @@ export function useVaultAgentBridge(input: UseVaultAgentBridgeInput): void {
           vaultSnapshotRef.current.notes,
         ),
         getCustomGroups: () => vaultSnapshotRef.current.customGroups,
+        // Read on every call so a change made in the settings window applies
+        // to the very next MCP request.
+        getExternalNotesPolicy: () => ({
+          allowed: readExternalMcpNotesAccess(),
+          maskSecrets: readExternalMcpNotesMaskSecrets(),
+        }),
         getGroupConfigs: () => vaultSnapshotRef.current.groupConfigs,
         getPortForwardingRules: () => vaultSnapshotRef.current.portForwardingRules,
         getManagedSources: () => vaultSnapshotRef.current.managedSources,

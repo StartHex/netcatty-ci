@@ -287,6 +287,106 @@ describe('handleVaultAgentOp vault notes', () => {
     assert.deepEqual(deps.getNotes().map((note) => note.id), ['note-2']);
   });
 
+  it('notes stay closed to MCP callers until the user allows external access', async () => {
+    const notes: VaultNote[] = [{ id: 'note-1', title: 'One', content: 'a', createdAt: 1, updatedAt: 1 }];
+    const closed = createDeps({ notes });
+    for (const op of ['note.list', 'note.get', 'note.search', 'note.create', 'note.delete']) {
+      const result = await handleVaultAgentOp(op, { noteId: 'note-1', query: 'a', title: 't', content: 'c', __viaMcp: true }, closed);
+      assert.equal(result.ok, false, op);
+      assert.equal(result.code, 'NOTES_ACCESS_DISABLED', op);
+    }
+    assert.deepEqual(closed.getNotes().map((note) => note.id), ['note-1']);
+    // The in-app assistant is not an MCP caller and keeps working.
+    assert.equal((await handleVaultAgentOp('note.list', {}, closed)).ok, true);
+
+    const open = createDeps({ notes, getExternalNotesPolicy: () => ({ allowed: true, maskSecrets: false }) });
+    assert.equal((await handleVaultAgentOp('note.list', { __viaMcp: true }, open)).ok, true);
+  });
+
+  it('masks secrets for MCP readers and refuses to write the mask back', async () => {
+    const content = 'db host 10.0.0.8\npassword: Uf7,Ly2<c8\nnext line';
+    const deps = createDeps({
+      notes: [{ id: 'note-1', title: 'Creds', content, createdAt: 1, updatedAt: 1 }],
+      getExternalNotesPolicy: () => ({ allowed: true, maskSecrets: true }),
+    });
+    const masked = await handleVaultAgentOp('note.get', { noteId: 'note-1', __viaMcp: true }, deps) as { ok: boolean; note: { content: string } };
+    assert.equal(masked.ok, true);
+    assert.doesNotMatch(masked.note.content, /Uf7|Ly2/);
+    assert.match(masked.note.content, /\[hidden\]/);
+    assert.match(masked.note.content, /db host 10\.0\.0\.8/);
+
+    // A caller cannot switch masking off with its own parameter.
+    const forged = await handleVaultAgentOp('note.get', { noteId: 'note-1', __viaMcp: true, __maskNoteSecrets: false }, deps) as { note: { content: string } };
+    assert.doesNotMatch(forged.note.content, /Uf7|Ly2/);
+
+    const found = await handleVaultAgentOp('note.search', { query: 'password', __viaMcp: true }, deps);
+    assert.equal(found.ok, true);
+    assert.doesNotMatch(JSON.stringify(found), /Uf7|Ly2/);
+
+    const writeBack = await handleVaultAgentOp('note.update', { noteId: 'note-1', content: masked.note.content, __viaMcp: true }, deps);
+    assert.equal(writeBack.ok, false);
+    assert.equal(writeBack.code, 'NOTE_CONTAINS_MASKED_SECRETS');
+    assert.equal(deps.getNotes()[0]?.content, content);
+
+    // Without masking the in-app assistant still reads the real text.
+    const plain = await handleVaultAgentOp('note.get', { noteId: 'note-1' }, deps) as { note: { content: string } };
+    assert.equal(plain.note.content, content);
+  });
+
+  it('organizes daily notes: create in the organized area, mark sources, list and undo', async () => {
+    const deps = createDeps({
+      notes: [
+        { id: 'd1', title: 'Mon', content: 'alpha', createdAt: 1, updatedAt: 1 },
+        { id: 'd2', title: 'Tue', content: 'beta', createdAt: 2, updatedAt: 2 },
+        { id: 'd3', title: 'Wed', content: 'gamma', createdAt: 3, updatedAt: 3 },
+      ],
+    });
+    const created = await handleVaultAgentOp('note.create', {
+      title: 'Week summary', content: 'alpha + beta', area: 'organized', organizedFrom: JSON.stringify(['d1', 'd2']),
+    }, deps) as { ok: boolean; note: { id: string } };
+    assert.equal(created.ok, true);
+    const byId = () => new Map(deps.getNotes().map((note) => [note.id, note]));
+    assert.equal(byId().get(created.note.id)?.area, 'organized');
+    assert.deepEqual(byId().get(created.note.id)?.organizedFrom, ['d1', 'd2']);
+    assert.equal(byId().get('d1')?.organizedInto, created.note.id);
+    assert.equal(byId().get('d1')?.content, 'alpha');
+    assert.equal(byId().get('d3')?.organizedAt, undefined);
+
+    const pending = await handleVaultAgentOp('note.list', { area: 'daily', organized: 'false' }, deps) as { notes: Array<{ id: string }> };
+    assert.deepEqual(pending.notes.map((note) => note.id), ['d3']);
+    const organizedArea = await handleVaultAgentOp('note.list', { area: 'organized' }, deps) as { notes: Array<{ id: string }> };
+    assert.deepEqual(organizedArea.notes.map((note) => note.id), [created.note.id]);
+
+    const marked = await handleVaultAgentOp('note.markOrganized', { noteIds: JSON.stringify(['d3']), organizedNoteId: created.note.id }, deps);
+    assert.equal(marked.ok, true);
+    assert.equal(byId().get('d3')?.organizedInto, created.note.id);
+    const undone = await handleVaultAgentOp('note.markOrganized', { noteIds: JSON.stringify(['d3']), undo: 'true' }, deps);
+    assert.equal(undone.ok, true);
+    assert.equal(byId().get('d3')?.organizedAt, undefined);
+    assert.equal(byId().get('d3')?.organizedInto, undefined);
+
+    const wrongTarget = await handleVaultAgentOp('note.markOrganized', { noteIds: JSON.stringify(['d3']), organizedNoteId: 'd1' }, deps);
+    assert.equal(wrongTarget.ok, false);
+  });
+
+  it('note.move moves notes between the daily and organized areas', async () => {
+    const deps = createDeps({
+      notes: [
+        { id: 'n1', title: 'One', content: 'a', createdAt: 1, updatedAt: 1 },
+        { id: 'n2', title: 'Two', content: 'b', createdAt: 2, updatedAt: 2 },
+      ],
+    });
+    const moved = await handleVaultAgentOp('note.move', { noteIds: JSON.stringify(['n1']), area: 'organized' }, deps);
+    assert.equal(moved.ok, true);
+    assert.equal(deps.getNotes().find((note) => note.id === 'n1')?.area, 'organized');
+    assert.equal(deps.getNotes().find((note) => note.id === 'n2')?.area, undefined);
+    const back = await handleVaultAgentOp('note.move', { noteIds: JSON.stringify(['n1']), area: 'daily' }, deps);
+    assert.equal(back.ok, true);
+    assert.equal(deps.getNotes().find((note) => note.id === 'n1')?.area, undefined);
+    assert.equal((await handleVaultAgentOp('note.move', { noteIds: JSON.stringify(['n1']), area: 'elsewhere' }, deps)).ok, false);
+    assert.equal((await handleVaultAgentOp('note.move', { noteIds: JSON.stringify(['missing']), area: 'organized' }, deps)).ok, false);
+  });
+
   it('note.import appends generated markdown and keeps the explicit title', async () => {
     const deps = createDeps({
       notes: [{ id: 'note-1', title: 'Existing', content: 'keep', createdAt: 1, updatedAt: 1 }],

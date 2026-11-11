@@ -3,6 +3,7 @@ import {
   Download,
   Edit2,
   Expand,
+  FileCheck,
   FileText,
   Folder,
   FolderPlus,
@@ -16,6 +17,15 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import {
+  countNotesByArea,
+  filterNotesForArea,
+  getNoteArea,
+  isNoteOrganizedAway,
+  moveNotesToArea,
+  unmarkNotesOrganized,
+  type NoteArea,
+} from "../../domain/notes/noteAreas";
 import React, {
   lazy,
   memo,
@@ -552,11 +562,27 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   const sortedNotes = useMemo(() => sortNoteItems(normalizeVaultNotes(notes)), [notes]);
   sortedNotesRef.current = sortedNotes;
 
+  // Daily notes and organized notes are browsed separately. Daily notes that
+  // were already written up into an organized note stay out of the way unless
+  // the user asks to see them.
+  const [noteArea, setNoteArea] = useState<NoteArea>("daily");
+  const [showOrganizedAway, setShowOrganizedAway] = useState(false);
+  const areaCounts = useMemo(() => countNotesByArea(sortedNotes), [sortedNotes]);
+  const organizedAwayCount = areaCounts.daily - areaCounts.dailyPending;
+  const areaNotes = useMemo(
+    () => filterNotesForArea(sortedNotes, noteArea, { hideOrganizedAway: !showOrganizedAway }),
+    [noteArea, showOrganizedAway, sortedNotes],
+  );
+  const revealNoteArea = useCallback((note: VaultNote) => {
+    setNoteArea(getNoteArea(note));
+    if (isNoteOrganizedAway(note)) setShowOrganizedAway(true);
+  }, []);
+
   // The index lower-cases every note body, so it is only built while searching.
   const hasDeferredQuery = deferredQuery.trim().length > 0;
   const noteSearchIndex = useMemo(
-    () => (hasDeferredQuery ? createNoteSearchIndex(sortedNotes, hosts) : null),
-    [hasDeferredQuery, hosts, sortedNotes],
+    () => (hasDeferredQuery ? createNoteSearchIndex(areaNotes, hosts) : null),
+    [areaNotes, hasDeferredQuery, hosts],
   );
   const searchResult = useMemo(
     () => (noteSearchIndex ? noteSearchIndex(deferredQuery) : EMPTY_NOTE_SEARCH_RESULT),
@@ -692,12 +718,12 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   }, [flushNoteDraft]);
 
   const noteTree = useMemo(() => {
-    const tree = buildNoteTree(groups, sortedNotes);
+    const tree = buildNoteTree(groups, areaNotes);
     return {
       children: sortFolderNodes(tree.children, groupOrderByPath),
       rootNotes: sortNoteItems(tree.rootNotes),
     };
-  }, [groupOrderByPath, groups, sortedNotes]);
+  }, [areaNotes, groupOrderByPath, groups]);
   const selectedNote = getSelectedVaultNote(sortedNotes, selectedNoteId);
   const overlayNote = sortedNotes.find((note) => note.id === overlayNoteId) ?? null;
   const selectedNoteView = useMemo(() => {
@@ -822,6 +848,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     const note = sortedNotes.find((item) => item.id === openNoteId);
     if (!note) return;
     const nextSelection = getNoteSelectionState(note, isSidebarMode);
+    revealNoteArea(note);
     setSelectedNoteId(nextSelection.selectedNoteId);
     setSelectedGroup(nextSelection.selectedGroup);
     setOverlayNoteId(nextSelection.overlayNoteId);
@@ -829,7 +856,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
       setExpandedGroups((current) => new Set([...current, ...ancestorNoteGroupPaths(note.group || "")]));
     }
     onOpenNoteIdHandled?.();
-  }, [isSidebarMode, onOpenNoteIdHandled, openNoteId, openNoteRequestId, sortedNotes]);
+  }, [isSidebarMode, onOpenNoteIdHandled, openNoteId, openNoteRequestId, revealNoteArea, sortedNotes]);
 
   useEffect(() => {
     if (expandedPanel !== "search") return;
@@ -980,6 +1007,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     let created: VaultNote | null = null;
     commitNotesAfterFlush((notes) => {
       created = createNote(group, getNextVaultOrder(notes));
+      if (noteArea === "organized") created.area = "organized";
       return [...notes, created];
     });
     if (!created) return;
@@ -1053,7 +1081,11 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
         return;
       }
 
-      const mergedNotes = commitNotes(result.notes);
+      const existingNoteIds = new Set(sortedNotesRef.current.map((note) => note.id));
+      const importedIds = result.notes.filter((note) => !existingNoteIds.has(note.id)).map((note) => note.id);
+      const mergedNotes = commitNotes(
+        noteArea === "organized" ? moveNotesToArea(result.notes, importedIds, "organized").notes : result.notes,
+      );
       if (targetGroup) expandPath(targetGroup);
 
       const lastImported = mergedNotes[mergedNotes.length - 1];
@@ -1146,8 +1178,10 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     const source = sortedNotesRef.current.find((note) => note.id === noteId);
     if (!source) return;
     const now = Date.now();
+    // The copy is a fresh note: it does not inherit the "organized" links.
+    const { organizedAt: _organizedAt, organizedInto: _organizedInto, organizedFrom: _organizedFrom, ...sourceFields } = source;
     const copy: VaultNote = {
-      ...source,
+      ...sourceFields,
       id: crypto.randomUUID(),
       title: `${source.title} (${t("action.copy")})`,
       createdAt: now,
@@ -1384,8 +1418,49 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     resetTreeDragState();
   };
 
+  const moveNoteToArea = (noteId: string, area: NoteArea) => {
+    flushNoteDraft();
+    const moved = moveNotesToArea(sortedNotesRef.current, [noteId], area);
+    if (moved.movedIds.length === 0) return;
+    commitNotes(moved.notes);
+    toast.success(t(area === "organized" ? "notes.area.toast.movedToOrganized" : "notes.area.toast.movedToDaily"));
+  };
+
+  const clearNoteOrganizedMark = (noteId: string) => {
+    flushNoteDraft();
+    const cleared = unmarkNotesOrganized(sortedNotesRef.current, [noteId]);
+    if (cleared.unmarkedIds.length === 0) return;
+    commitNotes(cleared.notes);
+  };
+
+  const openOrganizedTarget = (noteId: string) => {
+    const target = sortedNotesRef.current.find((item) => item.id === noteId);
+    if (!target) return;
+    revealNoteArea(target);
+    const nextSelection = getNoteSelectionState(target, isSidebarMode);
+    setSelectedNoteId(nextSelection.selectedNoteId);
+    setSelectedGroup(nextSelection.selectedGroup);
+    setOverlayNoteId(nextSelection.overlayNoteId);
+    if (target.group) expandPath(target.group);
+  };
+
   const renderNoteActions = (note: VaultNote, mode: "dropdown" | "context", closeMenu?: () => void) => {
-    const actions = [
+    const organizedAway = isNoteOrganizedAway(note);
+    const organizedTargetId = organizedAway ? note.organizedInto : undefined;
+    const hasOrganizedTarget = Boolean(organizedTargetId)
+      && sortedNotesRef.current.some((item) => item.id === organizedTargetId);
+    const areaActions: Array<{ label: string; action: () => void; destructive?: boolean }> = [
+      getNoteArea(note) === "organized"
+        ? { label: t("notes.area.action.moveToDaily"), action: () => moveNoteToArea(note.id, "daily") }
+        : { label: t("notes.area.action.moveToOrganized"), action: () => moveNoteToArea(note.id, "organized") },
+    ];
+    if (organizedAway) {
+      if (hasOrganizedTarget && organizedTargetId) {
+        areaActions.push({ label: t("notes.area.action.openOrganized"), action: () => openOrganizedTarget(organizedTargetId) });
+      }
+      areaActions.push({ label: t("notes.area.action.clearOrganized"), action: () => clearNoteOrganizedMark(note.id) });
+    }
+    const actions: Array<{ label: string; action: () => void; destructive?: boolean }> = [
       {
         label: t("common.rename"),
         action: () => setEditingNoteId(note.id),
@@ -1394,6 +1469,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
         label: t("action.copy"),
         action: () => duplicateNoteById(note.id),
       },
+      ...areaActions,
       {
         label: t("notes.action.exportNote"),
         action: () => exportNoteToMarkdown(note),
@@ -1557,8 +1633,15 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
               renameNoteFromTree(note.id, name);
             }}
             onRenameCancel={() => setEditingNoteId(null)}
-            icon={<FileText size={16} className="shrink-0 text-muted-foreground" />}
+            icon={isNoteOrganizedAway(note) ? (
+              <span className="flex shrink-0 items-center" title={t("notes.area.organizedBadge")}>
+                <FileCheck size={16} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+              </span>
+            ) : (
+              <FileText size={16} className="shrink-0 text-muted-foreground" />
+            )}
             iconClassName="mr-1"
+            data-note-organized={isNoteOrganizedAway(note) ? "true" : undefined}
             data-note-id={note.id}
             data-notes-drag-kind="note"
             data-notes-context-menu="note"
@@ -1887,6 +1970,55 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
           >
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div className="min-w-0 flex-shrink-0 overflow-hidden">
+            <div className="flex min-w-0 items-center gap-1 border-b border-border/60 px-1.5 py-1" data-notes-area-switch>
+              <div className="flex min-w-0 flex-1 rounded-md bg-secondary/50 p-0.5" role="tablist" aria-label={t("notes.area.label")}>
+                {(["daily", "organized"] as const).map((area) => (
+                  <button
+                    key={area}
+                    type="button"
+                    role="tab"
+                    aria-selected={noteArea === area}
+                    data-notes-area={area}
+                    className={cn(
+                      "flex h-6 min-w-0 flex-1 items-center justify-center gap-1 rounded px-1.5 text-xs transition-colors",
+                      noteArea === area
+                        ? "bg-background font-medium text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                    onClick={() => setNoteArea(area)}
+                  >
+                    <span className="truncate">{t(area === "daily" ? "notes.area.daily" : "notes.area.organized")}</span>
+                    <span className="shrink-0 tabular-nums opacity-70">
+                      {area === "daily" ? (showOrganizedAway ? areaCounts.daily : areaCounts.dailyPending) : areaCounts.organized}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {noteArea === "daily" && organizedAwayCount > 0 ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-pressed={showOrganizedAway}
+                      data-notes-show-organized
+                      className={cn(
+                        "flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-xs transition-colors",
+                        showOrganizedAway
+                          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                          : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+                      )}
+                      onClick={() => setShowOrganizedAway((current) => !current)}
+                    >
+                      <FileCheck size={12} />
+                      <span className="tabular-nums">{organizedAwayCount}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {t(showOrganizedAway ? "notes.area.hideOrganized" : "notes.area.showOrganized", { count: organizedAwayCount })}
+                  </TooltipContent>
+                </Tooltip>
+              ) : null}
+            </div>
             <div className={cn(
               TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS,
               "flex min-w-0 items-center gap-1 overflow-x-auto border-b border-border/60 px-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
@@ -2063,7 +2195,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
               onDrop={(event) => handleGroupDrop(null, event)}
             >
               <NotesTreePane
-                notes={sortedNotes}
+                notes={areaNotes}
                 noteGroups={groups}
                 selectedNoteId={selectedNoteId}
                 selectedGroup={selectedGroup}

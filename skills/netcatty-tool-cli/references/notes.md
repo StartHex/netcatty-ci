@@ -12,6 +12,9 @@ Do not use them to add SSH hosts. Host Details metadata uses `vault host-notes g
 | `vault_notes_update` | `notes update` |
 | `vault_notes_delete` | `notes delete` |
 | `vault_notes_import` | `notes import` |
+| `vault_notes_search` | MCP only |
+| `vault_notes_move` | MCP only |
+| `vault_notes_mark_organized` | MCP only |
 
 ## Commands
 

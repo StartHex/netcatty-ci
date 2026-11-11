@@ -60,10 +60,13 @@ const DEFERRED_MCP_TOOLSETS = Object.freeze({
   vault_notes: Object.freeze([
     "vault_notes_list",
     "vault_notes_get",
+    "vault_notes_search",
     "vault_notes_create",
     "vault_notes_update",
     "vault_notes_delete",
     "vault_notes_import",
+    "vault_notes_move",
+    "vault_notes_mark_organized",
   ]),
   snippets: Object.freeze([
     "snippets_list",

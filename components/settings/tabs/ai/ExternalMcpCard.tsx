@@ -4,12 +4,16 @@ import { useI18n } from "../../../../application/i18n/I18nProvider";
 import {
   readExternalMcpApprovalAlertMode,
   readExternalMcpFocusOnHostOpen,
+  readExternalMcpNotesAccess,
+  readExternalMcpNotesMaskSecrets,
   readExternalMcpIdleTimeoutMinutes,
   readExternalMcpMode,
   readExternalMcpSilentSessions,
   readSessionIdleTimeoutMinutes,
   writeExternalMcpApprovalAlertMode,
   writeExternalMcpFocusOnHostOpen,
+  writeExternalMcpNotesAccess,
+  writeExternalMcpNotesMaskSecrets,
   writeExternalMcpIdleTimeoutMinutes,
   writeExternalMcpMode,
   writeExternalMcpSilentSessions,
@@ -260,6 +264,8 @@ export const ExternalMcpCard: React.FC = () => {
   const [mode, setModeRaw] = useState<ExternalMcpMode>(() => readExternalMcpMode());
   const [idleTimeoutMinutes, setIdleTimeoutRaw] = useState<number>(() => readExternalMcpIdleTimeoutMinutes());
   const [focusOnHostOpen, setFocusOnHostOpenRaw] = useState<boolean>(() => readExternalMcpFocusOnHostOpen());
+  const [notesAccess, setNotesAccessRaw] = useState<boolean>(() => readExternalMcpNotesAccess());
+  const [notesMaskSecrets, setNotesMaskSecretsRaw] = useState<boolean>(() => readExternalMcpNotesMaskSecrets());
   const [approvalAlert, setApprovalAlertRaw] = useState<ExternalMcpApprovalAlertMode>(
     () => readExternalMcpApprovalAlertMode(),
   );
@@ -321,6 +327,16 @@ export const ExternalMcpCard: React.FC = () => {
   const setFocusOnHostOpen = useCallback((nextFocusOnHostOpen: boolean) => {
     setFocusOnHostOpenRaw(nextFocusOnHostOpen);
     writeExternalMcpFocusOnHostOpen(nextFocusOnHostOpen);
+  }, []);
+
+  const setNotesAccess = useCallback((next: boolean) => {
+    setNotesAccessRaw(next);
+    writeExternalMcpNotesAccess(next);
+  }, []);
+
+  const setNotesMaskSecrets = useCallback((next: boolean) => {
+    setNotesMaskSecretsRaw(next);
+    writeExternalMcpNotesMaskSecrets(next);
   }, []);
 
   const setApprovalAlert = useCallback((next: ExternalMcpApprovalAlertMode) => {
@@ -823,6 +839,28 @@ export const ExternalMcpCard: React.FC = () => {
             ariaLabel={t("ai.externalMcp.focusOnHostOpen")}
           />
         </SettingRow>
+        <SettingRow
+          label={t("ai.externalMcp.notesAccess")}
+          description={t("ai.externalMcp.notesAccess.description")}
+        >
+          <Toggle
+            checked={notesAccess}
+            onChange={setNotesAccess}
+            ariaLabel={t("ai.externalMcp.notesAccess")}
+          />
+        </SettingRow>
+        {notesAccess ? (
+          <SettingRow
+            label={t("ai.externalMcp.notesMaskSecrets")}
+            description={t("ai.externalMcp.notesMaskSecrets.description")}
+          >
+            <Toggle
+              checked={notesMaskSecrets}
+              onChange={setNotesMaskSecrets}
+              ariaLabel={t("ai.externalMcp.notesMaskSecrets")}
+            />
+          </SettingRow>
+        ) : null}
         <SettingRow
           label={t("ai.externalMcp.silentSessions")}
           description={t("ai.externalMcp.silentSessions.description")}

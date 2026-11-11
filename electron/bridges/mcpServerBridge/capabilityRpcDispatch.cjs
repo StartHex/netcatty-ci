@@ -25,6 +25,9 @@ const SERVICE_BINDINGS = Object.freeze({
   "vault.note.update": { domain: "vault", method: "updateNote" },
   "vault.note.delete": { domain: "vault", method: "deleteNote" },
   "vault.note.import": { domain: "vault", method: "importNotes" },
+  "vault.note.search": { domain: "vault", method: "searchNotes" },
+  "vault.note.move": { domain: "vault", method: "moveNotes" },
+  "vault.note.markOrganized": { domain: "vault", method: "markNotesOrganized" },
   "vault.identity.list": { domain: "vault", method: "listIdentities" },
   "vault.proxyProfile.list": { domain: "vault", method: "listProxyProfiles" },
   "vault.group.list": { domain: "vault", method: "listGroups" },
@@ -205,7 +208,13 @@ function createCapabilityRpcDispatcher(deps) {
       ? deps.captureHostOpenScope?.(params?.chatSessionId)
       : null;
     approvalContext.beforeExecute?.();
-    const result = await handler(params, approvalContext);
+    // Notes carry their own user policy (off by default, optional secret
+    // masking) for clients connected over MCP. The flag is always set here
+    // from the resolved surface, so a caller can neither forge nor clear it.
+    const handlerParams = capability.id.startsWith("vault.note.")
+      ? { ...params, __viaMcp: surface === CAPABILITY_SURFACES.PUBLIC }
+      : params;
+    const result = await handler(handlerParams, approvalContext);
     if (capability.id === "vault.host.open" && result?.ok !== false && result?.sessionId) {
       const bound = await deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration, result);
       if (bound === false) {

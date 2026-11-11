@@ -457,6 +457,18 @@ export interface VaultNote {
   updatedAt: number;
   order?: number;
   isPinned?: boolean;
+  /**
+   * Which area the note lives in. Absent means the everyday ("daily") area;
+   * 'organized' is the area for cleaned-up notes. Independent of `group`:
+   * moving a note between areas keeps its folder.
+   */
+  area?: 'organized';
+  /** Daily note that has been folded into an organized note (hidden by default). */
+  organizedAt?: number;
+  /** The organized note this daily note was folded into. */
+  organizedInto?: string;
+  /** Daily notes an organized note was written from. */
+  organizedFrom?: string[];
 }
 
 export interface ChatMessage {

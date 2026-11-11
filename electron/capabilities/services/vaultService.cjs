@@ -84,10 +84,13 @@ function createVaultService(ctx = {}) {
         notes: params.notes,
       });
     },
-    listNotes: async () => {
+    // Note operations forward every parameter: the renderer validates them and
+    // applies the user's "notes over MCP" policy (__viaMcp is set by the
+    // capability dispatcher, never by the caller).
+    listNotes: async (params = {}) => {
       const bridgeErr = requireBridge();
       if (bridgeErr) return bridgeErr;
-      return invokeVaultAgent("note.list", {});
+      return invokeVaultAgent("note.list", params);
     },
     getNote: async (params = {}) => {
       const bridgeErr = requireBridge();
@@ -98,7 +101,23 @@ function createVaultService(ctx = {}) {
         maxChars: params.maxChars,
         query: params.query,
         expectedUpdatedAt: params.expectedUpdatedAt,
+        __viaMcp: params.__viaMcp,
       });
+    },
+    searchNotes: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("note.search", params);
+    },
+    moveNotes: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("note.move", params);
+    },
+    markNotesOrganized: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("note.markOrganized", params);
     },
     createNote: async (params = {}) => {
       const bridgeErr = requireBridge();
@@ -113,7 +132,7 @@ function createVaultService(ctx = {}) {
     deleteNote: async (params = {}) => {
       const bridgeErr = requireBridge();
       if (bridgeErr) return bridgeErr;
-      return invokeVaultAgent("note.delete", { noteId: params.noteId });
+      return invokeVaultAgent("note.delete", { noteId: params.noteId, __viaMcp: params.__viaMcp });
     },
     importNotes: async (params = {}) => {
       const bridgeErr = requireBridge();

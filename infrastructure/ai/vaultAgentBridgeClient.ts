@@ -31,6 +31,19 @@ import { applySnippetVariables, parseSnippetVariables } from '../../domain/snipp
 import { getNextVaultOrder } from '../../domain/vaultOrder';
 import { readVaultNote } from '../../domain/vaultNoteRead';
 import {
+  filterNotesForList,
+  getNoteArea,
+  isNoteOrganizedAway,
+  markNotesOrganized,
+  moveNotesToArea,
+  parseNoteArea,
+  parseNoteTimeBound,
+  unmarkNotesOrganized,
+  type NoteListFilter,
+} from '../../domain/notes/noteAreas';
+import { createNoteSearchIndex } from '../../domain/notes/noteSearch';
+import { NOTE_SECRET_MASK, maskNoteSecrets } from '../../domain/notes/noteSecretMask';
+import {
   runAutomationScript,
   stopScriptRun,
   pauseScriptRun,
@@ -197,6 +210,15 @@ export function sanitizePortForwardRuleForAgent(rule: PortForwardingRule): Recor
   };
 }
 
+function noteAreaFieldsForAgent(note: VaultNote) {
+  return {
+    area: getNoteArea(note),
+    ...(isNoteOrganizedAway(note) ? { organized: true, organizedAt: note.organizedAt } : {}),
+    ...(note.organizedInto ? { organizedInto: note.organizedInto } : {}),
+    ...(note.organizedFrom?.length ? { organizedFrom: note.organizedFrom } : {}),
+  };
+}
+
 function summarizeVaultNoteForList(note: VaultNote) {
   return {
     id: note.id,
@@ -204,8 +226,10 @@ function summarizeVaultNoteForList(note: VaultNote) {
     group: note.group,
     tags: note.tags,
     linkedHostIds: note.linkedHostIds,
+    createdAt: note.createdAt,
     updatedAt: note.updatedAt,
     contentLength: note.content.length,
+    ...noteAreaFieldsForAgent(note),
   };
 }
 
@@ -219,7 +243,66 @@ function serializeVaultNoteForAgent(note: VaultNote) {
     linkedHostIds: note.linkedHostIds,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
+    ...noteAreaFieldsForAgent(note),
   };
+}
+
+/** How notes may be used by AI clients connected over MCP (Settings → AI). */
+export interface ExternalNotesPolicy {
+  /** Off by default: notes often hold credentials. */
+  allowed: boolean;
+  /** Replace credential values in everything read from a note. */
+  maskSecrets: boolean;
+}
+
+export const EXTERNAL_NOTES_DISABLED_MESSAGE =
+  'Notes are not shared with external AI clients. The user can turn on "Allow external AI to access notes" in Netcatty Settings → AI → External MCP.';
+
+function parseNoteListFilter(params: Record<string, unknown>): NoteListFilter | { error: string } {
+  const filter: NoteListFilter = {};
+  if (params.area !== undefined && params.area !== '') {
+    const area = parseNoteArea(params.area);
+    if (!area) return { error: 'area must be "daily" or "organized".' };
+    filter.area = area;
+  }
+  if (typeof params.group === 'string' && params.group.trim()) filter.group = params.group;
+  if (params.organized !== undefined && params.organized !== '') {
+    if (params.organized === true || params.organized === 'true') filter.organized = true;
+    else if (params.organized === false || params.organized === 'false') filter.organized = false;
+    else return { error: 'organized must be true or false.' };
+  }
+  for (const key of ['updatedAfter', 'updatedBefore', 'createdAfter', 'createdBefore'] as const) {
+    if (params[key] === undefined || params[key] === '') continue;
+    const time = parseNoteTimeBound(params[key]);
+    if (time === null) return { error: `${key} must be an ISO date/time (2026-11-11 or 2026-11-11T08:00:00+08:00) or epoch milliseconds.` };
+    filter[key] = time;
+  }
+  if (params.limit !== undefined && params.limit !== '') {
+    const limit = Number(params.limit);
+    if (!Number.isFinite(limit) || limit < 1) return { error: 'limit must be a positive number.' };
+    filter.limit = limit;
+  }
+  return filter;
+}
+
+function parseNoteIdList(value: unknown, field: string): string[] | { error: string } {
+  let raw: unknown = value;
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (text.startsWith('[')) {
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        return { error: `${field} must be a JSON array of note ids.` };
+      }
+    } else {
+      raw = text ? text.split(',') : [];
+    }
+  }
+  if (!Array.isArray(raw)) return { error: `${field} must be a JSON array of note ids.` };
+  const ids = Array.from(new Set(raw.filter((id): id is string => typeof id === 'string').map((id) => id.trim()).filter(Boolean)));
+  if (ids.length === 0) return { error: `${field} must list at least one note id.` };
+  return ids;
 }
 
 const SAFE_GROUP_CONFIG_KEYS = [
@@ -492,6 +575,8 @@ async function executeSnippetOrScriptRun(
 export interface VaultAgentApiDeps {
   getHosts: () => Host[];
   getNotes: () => VaultNote[];
+  /** Policy for note tools called over MCP; omitted means not allowed. */
+  getExternalNotesPolicy?: () => ExternalNotesPolicy;
   getCustomGroups: () => string[];
   getGroupConfigs: () => GroupConfig[];
   getPortForwardingRules: () => PortForwardingRule[];
@@ -657,6 +742,43 @@ export async function handleVaultAgentOp(
   params: Record<string, unknown>,
   deps: VaultAgentApiDeps,
 ): Promise<Record<string, unknown>> {
+  // Note tools called over MCP (the main process sets __viaMcp for that
+  // surface) are subject to the user's notes policy: off unless enabled, and
+  // optionally with credentials masked in everything that is read back.
+  if (op.startsWith('note.') && params.__viaMcp === true) {
+    const policy = deps.getExternalNotesPolicy?.() ?? { allowed: false, maskSecrets: true };
+    if (!policy.allowed) {
+      return { ok: false, code: 'NOTES_ACCESS_DISABLED', error: EXTERNAL_NOTES_DISABLED_MESSAGE };
+    }
+    const { __viaMcp: _viaMcp, ...rest } = params;
+    if (
+      policy.maskSecrets
+      && op === 'note.update'
+      && typeof rest.content === 'string'
+      && rest.content.includes(NOTE_SECRET_MASK)
+    ) {
+      // The client only ever saw "[hidden]" in place of the secret: saving that
+      // text back would destroy the real value.
+      return {
+        ok: false,
+        code: 'NOTE_CONTAINS_MASKED_SECRETS',
+        error: `The new content contains "${NOTE_SECRET_MASK}" placeholders from masked reads. Updating would overwrite the real secrets, so it was refused. Write the organized text to a new note instead, or ask the user to turn off secret masking for notes.`,
+      };
+    }
+    const result = await handleVaultAgentOp(op, { ...rest, __maskNoteSecrets: policy.maskSecrets }, deps);
+    if (!policy.maskSecrets) return result;
+    const maskNote = (note: unknown): unknown => (
+      note && typeof note === 'object' && typeof (note as { content?: unknown }).content === 'string'
+        ? { ...(note as object), content: maskNoteSecrets((note as { content: string }).content).text }
+        : note
+    );
+    return {
+      ...result,
+      ...(result.note !== undefined && op !== 'note.get' ? { note: maskNote(result.note) } : {}),
+      secretsMasking: true,
+    };
+  }
+  const noteSecretsMasked = params.__maskNoteSecrets === true;
   switch (op) {
     case 'terminal.readContext': return handleTerminalContextRead(params);
     case 'session.inspectRecovery': {
@@ -1079,16 +1201,112 @@ export async function handleVaultAgentOp(
       return { ok: true, hostId };
     }
     case 'note.list': {
+      const filter = parseNoteListFilter(params);
+      if ('error' in filter) return { ok: false, error: filter.error };
+      const listed = filterNotesForList(deps.getNotes(), filter);
       return {
         ok: true,
-        notes: deps.getNotes().map(summarizeVaultNoteForList),
+        notes: listed.notes.map(summarizeVaultNoteForList),
+        total: listed.total,
+        ...(listed.truncated ? { truncated: true } : {}),
       };
     }
     case 'note.get': {
       const noteId = String(params.noteId || '');
       const note = deps.getNotes().find((entry) => entry.id === noteId);
       if (!note) return { ok: false, error: `Vault note "${noteId}" was not found.` };
-      return readVaultNote(note, params);
+      const read = readVaultNote(note, params);
+      if (!read.ok || !('note' in read) || !read.note) return read;
+      const base = { ...read, note: { ...read.note, ...noteAreaFieldsForAgent(note) } };
+      if (!noteSecretsMasked) return base;
+      // Masked after slicing, so offsets keep referring to the stored text.
+      const masked = maskNoteSecrets(base.note.content);
+      return {
+        ...base,
+        note: { ...base.note, content: masked.text },
+        ...(masked.maskedCount > 0 ? { secretsMasked: masked.maskedCount } : {}),
+      };
+    }
+    case 'note.search': {
+      const query = typeof params.query === 'string' ? params.query.trim() : '';
+      if (!query) return { ok: false, error: 'query is required.' };
+      if (query.length > 200) return { ok: false, error: 'query must be at most 200 characters.' };
+      const filter = parseNoteListFilter({ ...params, limit: undefined });
+      if ('error' in filter) return { ok: false, error: filter.error };
+      const candidates = filterNotesForList(deps.getNotes(), filter).notes;
+      const limit = Math.max(1, Math.min(50, Math.floor(Number(params.limit) || 20)));
+      const result = createNoteSearchIndex(candidates, deps.getHosts())(query, { maxSnippets: 3 });
+      const hits = candidates
+        .filter((note) => result.hits.has(note.id))
+        .map((note) => {
+          const hit = result.hits.get(note.id)!;
+          return {
+            ...summarizeVaultNoteForList(note),
+            matchCount: hit.bodyMatchCount,
+            titleMatched: hit.titleRanges.length > 0,
+            snippets: hit.snippets.map((snippet) => ({
+              line: snippet.line,
+              text: noteSecretsMasked ? maskNoteSecrets(snippet.text).text : snippet.text,
+            })),
+          };
+        });
+      return {
+        ok: true,
+        query,
+        total: hits.length,
+        notes: hits.slice(0, limit),
+        ...(hits.length > limit ? { truncated: true } : {}),
+      };
+    }
+    case 'note.move': {
+      const noteIds = parseNoteIdList(params.noteIds, 'noteIds');
+      if ('error' in noteIds) return { ok: false, error: noteIds.error };
+      const area = parseNoteArea(params.area);
+      if (!area) return { ok: false, error: 'area must be "daily" or "organized".' };
+      const known = new Set(deps.getNotes().map((note) => note.id));
+      const missing = noteIds.filter((id) => !known.has(id));
+      if (missing.length > 0) return { ok: false, error: `Vault note(s) not found: ${missing.join(', ')}` };
+      const moved = moveNotesToArea(deps.getNotes(), noteIds, area, {
+        ...(typeof params.group === 'string' ? { group: params.group } : {}),
+      });
+      if (moved.movedIds.length > 0 && deps.updateNotes(normalizeVaultNotes(moved.notes)) === false) {
+        return { ok: false, error: 'Vault notes could not be saved.' };
+      }
+      return { ok: true, area, movedIds: moved.movedIds, unchangedIds: noteIds.filter((id) => !moved.movedIds.includes(id)) };
+    }
+    case 'note.markOrganized': {
+      const noteIds = parseNoteIdList(params.noteIds, 'noteIds');
+      if ('error' in noteIds) return { ok: false, error: noteIds.error };
+      const notes = deps.getNotes();
+      const known = new Map(notes.map((note) => [note.id, note]));
+      const missing = noteIds.filter((id) => !known.has(id));
+      if (missing.length > 0) return { ok: false, error: `Vault note(s) not found: ${missing.join(', ')}` };
+      if (params.undo === true || params.undo === 'true') {
+        const undone = unmarkNotesOrganized(notes, noteIds);
+        if (undone.unmarkedIds.length > 0 && deps.updateNotes(normalizeVaultNotes(undone.notes)) === false) {
+          return { ok: false, error: 'Vault notes could not be saved.' };
+        }
+        return { ok: true, unmarkedIds: undone.unmarkedIds };
+      }
+      const organizedNoteId = typeof params.organizedNoteId === 'string' ? params.organizedNoteId.trim() : '';
+      if (organizedNoteId) {
+        const target = known.get(organizedNoteId);
+        if (!target) return { ok: false, error: `Organized note "${organizedNoteId}" was not found.` };
+        if (getNoteArea(target) !== 'organized') {
+          return { ok: false, error: 'organizedNoteId must be a note in the organized area. Create it there (area: "organized") or move it first.' };
+        }
+      }
+      const marked = markNotesOrganized(notes, noteIds, organizedNoteId || undefined);
+      if (marked.markedIds.length > 0 && deps.updateNotes(normalizeVaultNotes(marked.notes)) === false) {
+        return { ok: false, error: 'Vault notes could not be saved.' };
+      }
+      return {
+        ok: true,
+        markedIds: marked.markedIds,
+        // Only daily-area notes can be marked; organized-area notes are skipped.
+        skippedIds: noteIds.filter((id) => !marked.markedIds.includes(id)),
+        ...(organizedNoteId ? { organizedNoteId } : {}),
+      };
     }
     case 'note.create': {
       const title = sanitizeNoteTitle(params.title);
@@ -1098,6 +1316,26 @@ export async function handleVaultAgentOp(
       if (linkedHostIds && 'error' in linkedHostIds) return { ok: false, error: linkedHostIds.error };
       const tags = parseOptionalStringArray(params.tags, 'tags');
       if (tags && 'error' in tags) return { ok: false, error: tags.error };
+      let createArea: 'daily' | 'organized' = 'daily';
+      if (params.area !== undefined && params.area !== '') {
+        const parsedArea = parseNoteArea(params.area);
+        if (!parsedArea) return { ok: false, error: 'area must be "daily" or "organized".' };
+        createArea = parsedArea;
+      }
+      let sourceIds: string[] = [];
+      if (params.organizedFrom !== undefined && params.organizedFrom !== '') {
+        if (createArea !== 'organized') {
+          return { ok: false, error: 'organizedFrom is only valid with area: "organized".' };
+        }
+        const parsedSources = parseNoteIdList(params.organizedFrom, 'organizedFrom');
+        if ('error' in parsedSources) return { ok: false, error: parsedSources.error };
+        const knownIds = new Set(deps.getNotes().map((entry) => entry.id));
+        const missingSources = parsedSources.filter((id) => !knownIds.has(id));
+        if (missingSources.length > 0) {
+          return { ok: false, error: `organizedFrom note(s) not found: ${missingSources.join(', ')}` };
+        }
+        sourceIds = parsedSources;
+      }
       const note = sanitizeVaultNote({
         title,
         content,
@@ -1105,10 +1343,20 @@ export async function handleVaultAgentOp(
         linkedHostIds,
         tags,
         order: getNextVaultOrder(deps.getNotes()),
+        ...(createArea === 'organized' ? { area: 'organized' as const } : {}),
       });
-      const nextNotes = normalizeVaultNotes([...deps.getNotes(), note]);
+      // Writing an organized note from daily notes marks those originals in the
+      // same save, so a half-finished run cannot leave them unlinked.
+      const withNote = [...deps.getNotes(), note];
+      const linked = sourceIds.length > 0 ? markNotesOrganized(withNote, sourceIds, note.id) : null;
+      const nextNotes = normalizeVaultNotes(linked ? linked.notes : withNote);
       if (deps.updateNotes(nextNotes) === false) return { ok: false, error: 'Vault note could not be saved.' };
-      return { ok: true, note: serializeVaultNoteForAgent(note) };
+      const saved = nextNotes.find((entry) => entry.id === note.id) ?? note;
+      return {
+        ok: true,
+        note: serializeVaultNoteForAgent(saved),
+        ...(linked ? { markedOrganizedIds: linked.markedIds } : {}),
+      };
     }
     case 'note.update': {
       const noteId = String(params.noteId || '');

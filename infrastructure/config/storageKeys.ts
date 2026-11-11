@@ -262,6 +262,10 @@ export const STORAGE_KEY_AI_EXTERNAL_MCP_MODE = 'netcatty_ai_external_mcp_mode_v
 export const STORAGE_KEY_AI_EXTERNAL_MCP_IDLE_TIMEOUT_MINUTES = 'netcatty_ai_external_mcp_idle_timeout_minutes_v1';
 /** External MCP: whether host_open should surface/focus the main window (default true). */
 export const STORAGE_KEY_AI_EXTERNAL_MCP_FOCUS_ON_HOST_OPEN = 'netcatty_ai_external_mcp_focus_on_host_open_v1';
+/** Let MCP clients read and organize Vault → Notes. Off unless the user opts in. */
+export const STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS = 'netcatty_ai_external_mcp_notes_access_v1';
+/** Hide passwords / tokens in note text returned to MCP clients. On by default. */
+export const STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS = 'netcatty_ai_external_mcp_notes_mask_secrets_v1';
 /** Idle timeout for terminal sessions opened by an AI through host_open. */
 export const STORAGE_KEY_AI_SESSION_IDLE_TIMEOUT_MINUTES = 'netcatty_ai_session_idle_timeout_minutes_v1';
 /** External MCP: whether host_open sessions stay hidden from the tab bar (default false). */
