@@ -81,6 +81,13 @@ jobs:
       - name: Build package
         run: npm run ${{ matrix.pack_script }}
 
+      # Same smoke test upstream runs on its release builds: connects through
+      # the packaged app.asar with the Electron runtime, so a build whose SSH
+      # transport is broken (e.g. the ChaCha20 fallback missing from the
+      # package) fails here instead of on a user's machine.
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
       - name: Verify node-pty Linux runtime
         if: matrix.name == 'linux-x64'
         run: bash scripts/ensure-node-pty-linux.sh verify x64
