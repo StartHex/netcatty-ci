@@ -876,3 +876,20 @@ test("install handler installs directly when no main window is reachable", async
     global.setTimeout = originalSetTimeout;
   }
 });
+
+test("fork builds never use electron-updater, whatever the package format", async () => {
+  await withLinuxPackageEnvironment({ appImage: true }, async () => {
+    await withMocks({}, async ({ bridge }) => {
+      assert.equal(bridge.isAutoUpdateSupported(), true, "an upstream version keeps auto-update");
+      for (const version of ["1.1.90-fork.57", "0.0.0-fork-36f32b9"]) {
+        bridge.init({
+          electronModule: {
+            app: { getPath: () => path.join("/", "tmp", "nc-autoupdate-test"), getVersion: () => version },
+            BrowserWindow: { getAllWindows: () => [] },
+          },
+        });
+        assert.equal(bridge.isAutoUpdateSupported(), false, version);
+      }
+    });
+  });
+});

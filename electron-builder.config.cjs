@@ -353,8 +353,9 @@ module.exports = {
     publish: [
         {
             provider: 'github',
-            owner: 'binaricat',
-            repo: 'Netcatty',
+            // Fork: never let a packaged build resolve upstream's update feed.
+            owner: 'StartHex',
+            repo: 'netcatty-ci',
             releaseType: 'release'
         }
     ]

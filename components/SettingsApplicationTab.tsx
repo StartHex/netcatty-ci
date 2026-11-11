@@ -16,7 +16,8 @@ type AppInfo = {
   platform?: string;
 };
 
-const REPO_URL = "https://github.com/binaricat/Netcatty";
+// Fork build: issues, discussions and releases belong to the fork repository.
+const REPO_URL = "https://github.com/StartHex/netcatty-ci";
 const BUG_REPORT_TEMPLATE = "bug_report.yml";
 
 const mapIssuePlatform = (platform?: string) => {

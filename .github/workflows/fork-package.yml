@@ -64,9 +64,20 @@ jobs:
       - name: Set package version
         shell: bash
         run: |
-          VERSION="0.0.0-fork-${GITHUB_SHA:0:7}"
-          echo "Setting version to ${VERSION}"
+          # <upstream version>-fork.<run number>: the upstream release this
+          # code is based on (fork-version.json, bumped when upstream is
+          # merged) plus a counter that grows with every packaging run, so a
+          # later build always sorts after an earlier one and merging a newer
+          # upstream moves the base forward.
+          UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+          if [[ ! "$UPSTREAM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::fork-version.json upstreamVersion must be x.y.z, got '${UPSTREAM_VERSION}'"
+            exit 1
+          fi
+          VERSION="${UPSTREAM_VERSION}-fork.${GITHUB_RUN_NUMBER}"
+          echo "Setting version to ${VERSION} (commit ${GITHUB_SHA:0:7})"
           npm pkg set version="${VERSION}"
+          echo "FORK_VERSION=${VERSION}" >> "$GITHUB_ENV"
 
       - name: Prepare node-pty Linux runtime
         if: matrix.name == 'linux-x64'
@@ -174,5 +185,26 @@ jobs:
             gh release edit "$tag" --title "$title" --notes "$notes" --prerelease
           else
             gh release create "$tag" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" release-upload/* --clobber
+
+      # The in-app update check reads these releases (tag v<version>). Only
+      # builds of the default branch are published as versions; builds of any
+      # other branch stay test builds on the rolling fork-*-latest tags above
+      # and are never offered to users as an update.
+      - name: Publish versioned release (default branch only)
+        if: github.ref_name == github.event.repository.default_branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${FORK_VERSION}"
+          notes="Netcatty fork build ${FORK_VERSION} (commit ${GITHUB_SHA:0:7}).
+          macOS builds are ad-hoc signed: after installing run
+          xattr -dr com.apple.quarantine /Applications/Netcatty.app"
+          # The three platform jobs race to create the same release.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Netcatty ${FORK_VERSION}" --notes "$notes" --target "$GITHUB_SHA" \
+              || gh release view "$tag" >/dev/null
           fi
           gh release upload "$tag" release-upload/* --clobber

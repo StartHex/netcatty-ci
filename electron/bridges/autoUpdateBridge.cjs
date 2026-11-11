@@ -68,11 +68,27 @@ function getLinuxPackageType() {
   }
 }
 
+function isForkBuild() {
+  try {
+    const { app } = _deps?.electronModule || {};
+    const version = app?.getVersion?.();
+    return typeof version === "string" && /-fork[.-]/.test(version);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Returns true when the current packaging format supports electron-updater
  * (macOS zip/dmg, Windows NSIS, Linux AppImage/deb/rpm/pacman).
  */
 function isAutoUpdateSupported() {
+  // Fork builds (`1.1.90-fork.57`, legacy `0.0.0-fork-<sha>`) never use
+  // electron-updater: the fork publishes plain installers without the signed
+  // update feed it needs (and an upstream feed would replace the fork with a
+  // build that lacks its modules). The renderer falls back to the release
+  // check against the fork repository plus a manual download link.
+  if (isForkBuild()) return false;
   if (process.platform === "darwin" || process.platform === "win32") {
     return true;
   }
