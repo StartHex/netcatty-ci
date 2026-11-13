@@ -80,6 +80,7 @@ test("the elevation command elevates an absolute PowerShell and carries no bare 
   const outer = command.args.at(-1);
   assert.match(outer, /Start-Process -FilePath 'C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe'/);
   assert.match(outer, /-Verb RunAs/);
+  assert.match(outer, /-WindowStyle Hidden \} catch \{/, "try and catch are one statement");
   // The token and the paths travel only inside the encoded script.
   assert.doesNotMatch(outer, /bbbbbbbb/);
   assert.doesNotMatch(outer, /Program Files/);

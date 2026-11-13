@@ -52,11 +52,11 @@ function buildElevationCommand({ execPath, helperPath, pipeName, token, env = pr
   ].join("; ");
   const encoded = Buffer.from(inner, "utf16le").toString("base64");
   const innerArgs = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-EncodedCommand", encoded];
-  const outer = [
-    "$ErrorActionPreference='Stop'",
-    `try { Start-Process -FilePath ${psQuote(powershell)} -ArgumentList ${innerArgs.map(psQuote).join(",")} -Verb RunAs -WindowStyle Hidden }`,
-    "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 5 }",
-  ].join("; ");
+  // No semicolon between the try block and its catch: PowerShell would end
+  // the statement there.
+  const outer = "$ErrorActionPreference='Stop'; "
+    + `try { Start-Process -FilePath ${psQuote(powershell)} -ArgumentList ${innerArgs.map(psQuote).join(",")} -Verb RunAs -WindowStyle Hidden } `
+    + "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 5 }";
   return {
     file: powershell,
     args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", outer],
