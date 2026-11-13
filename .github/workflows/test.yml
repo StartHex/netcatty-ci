@@ -192,6 +192,11 @@ jobs:
       - name: Exercise the administrator local terminal (cmd and PowerShell)
         run: npx electron scripts/elevated-local-pty.live.test.cjs
 
+      - name: Exercise note tabs in the desktop app
+        env:
+          NETCATTY_NOTE_TABS_SCREENSHOT: "1"
+        run: node scripts/note-tabs.live.cjs
+
       - name: Exercise terminal line numbers, marks and range copy in the desktop app
         env:
           NETCATTY_LINE_TOOLS_SCREENSHOT: "1"
