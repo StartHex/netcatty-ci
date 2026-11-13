@@ -987,6 +987,15 @@ async function buildLocalSessionEnv(
 }
 
 /**
+ * Runs the local shell as root through sudo. `-s` would start $SHELL, which
+ * may not be the shell this tab asked for, so the shell is named outright.
+ */
+function buildSudoShellLaunch(shell, shellArgs) {
+  const sudo = fs.existsSync("/usr/bin/sudo") ? "/usr/bin/sudo" : "sudo";
+  return { file: sudo, args: ["--", shell, ...(Array.isArray(shellArgs) ? shellArgs : [])] };
+}
+
+/**
  * Start a local terminal session
  */
 async function startLocalSession(event, payload) {
@@ -1054,16 +1063,40 @@ async function startLocalSession(event, payload) {
     }
   }
   
-  const proc = pty.spawn(shell, shellArgs, {
-    name: env.TERM || "xterm-256color",
-    cols: payload?.cols || 80,
-    rows: payload?.rows || 24,
-    env,
-    cwd,
-    encoding: null, // Return Buffer for ZMODEM binary support
-    // node-pty can only clear ConPTY through its bundled conpty.dll.
-    useConptyDll: process.platform === "win32",
-  });
+  // "Run as administrator" (Windows) / "run as root" (macOS, Linux).
+  const elevated = payload?.elevated === true;
+  let proc;
+  if (elevated && process.platform === "win32") {
+    // An elevated program cannot be started inside this process's own
+    // pseudo-console, so a helper approved through the UAC prompt owns the
+    // console and relays it.
+    const { spawnElevatedPty } = require("./terminalBridge/elevatedLocalPty.cjs");
+    proc = await spawnElevatedPty({
+      shell,
+      args: shellArgs,
+      cols: payload?.cols || 80,
+      rows: payload?.rows || 24,
+      cwd,
+      env,
+    });
+    if (event.sender.isDestroyed?.()) {
+      try { proc.kill(); } catch { /* ignore */ }
+      throw new Error("Local terminal window closed before startup");
+    }
+  } else {
+    // sudo asks for the password inside the terminal, like typing it by hand.
+    const launch = elevated ? buildSudoShellLaunch(shell, shellArgs) : { file: shell, args: shellArgs };
+    proc = pty.spawn(launch.file, launch.args, {
+      name: env.TERM || "xterm-256color",
+      cols: payload?.cols || 80,
+      rows: payload?.rows || 24,
+      env,
+      cwd,
+      encoding: null, // Return Buffer for ZMODEM binary support
+      // node-pty can only clear ConPTY through its bundled conpty.dll.
+      useConptyDll: process.platform === "win32",
+    });
+  }
   
   const session = {
     proc,
@@ -1080,6 +1113,7 @@ async function startLocalSession(event, payload) {
       }
     })(),
     label: "Local Terminal",
+    elevated,
     shellExecutable: shell,
     shellKind,
     flushPendingData: null,

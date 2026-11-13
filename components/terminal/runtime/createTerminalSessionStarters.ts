@@ -1900,6 +1900,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         },
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
         bootEpoch,
+        // Administrator (Windows, through the UAC prompt) or root (sudo).
+        elevated: ctx.host.localElevated === true ? true : undefined,
       });
 
       if (!isCurrentAttempt()) {
@@ -1987,7 +1989,11 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       scheduleStartupCommand(ctx, term, id);
     } catch (err) {
       if (ignoreStaleAttemptUi()) return;
-      const message = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      // The UAC prompt was declined: say so plainly instead of the IPC error text.
+      const message = /Administrator permission was not given/.test(rawMessage)
+        ? (ctx.t?.("terminal.local.elevationCancelled") || "Administrator permission was not given")
+        : rawMessage;
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start local shell: ${message}]`);
       ctx.updateStatus("disconnected");

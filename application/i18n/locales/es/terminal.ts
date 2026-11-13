@@ -86,6 +86,7 @@ export const esTerminalMessages: Messages = {
   'terminal.toolbar.startSessionLog': 'Iniciar registro de sesión',
   'terminal.toolbar.stopSessionLog': 'Detener registro de sesión',
   'terminal.toolbar.timestampsEnable': 'Mostrar marcas de tiempo',
+  'terminal.local.elevationCancelled': 'No se concedió el permiso de administrador',
   'terminal.lines.numbersEnable': 'Mostrar números de línea',
   'terminal.lines.numbersDisable': 'Ocultar números de línea',
   'terminal.lines.panel': 'Ir a línea, copiar líneas, marcas',

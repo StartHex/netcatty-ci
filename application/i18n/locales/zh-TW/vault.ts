@@ -461,6 +461,13 @@ export const zhTWVaultMessages: Messages = {
   'localShell.field.shellEmpty': '未找到可用的 Shell',
   'localShell.field.shellResolved': '啟動 {command}',
   'localShell.field.startDir': '啟動目錄',
+  'localShell.field.elevated.windows': '以系統管理員身分執行',
+  'localShell.field.elevated.windowsDesc': '每次開啟這個 Shell 時，Windows 會詢問是否允許。',
+  'localShell.field.elevated.posix': '以 root 身分執行（sudo）',
+  'localShell.field.elevated.posixDesc': 'Shell 會透過 sudo 啟動，並在終端機內要求輸入密碼。',
+  'qs.shellAsAdmin': '以系統管理員身分開啟',
+  'qs.shellAsAdminShort': '系統管理員',
+  'qs.shellAdminName': '{name}（系統管理員）',
   'localShell.field.startDirPlaceholder': '繼承全域起始目錄（未設定時為主目錄）',
   'localShell.saveAndConnect': '儲存並開啟',
 

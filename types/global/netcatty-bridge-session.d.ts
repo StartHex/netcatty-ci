@@ -139,6 +139,8 @@ declare global {
       env?: Record<string, string>;
       sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
       bootEpoch?: number;
+      /** Run as administrator (Windows, UAC prompt) or as root through sudo. */
+      elevated?: boolean;
     }): Promise<string>;
     startSerialSession?(options: {
       sessionId?: string;

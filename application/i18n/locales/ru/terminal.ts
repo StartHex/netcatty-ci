@@ -107,6 +107,7 @@ export const ruTerminalMessages: Messages = {
   'terminal.toolbar.startSessionLog': 'Начать журнал сессии',
   'terminal.toolbar.stopSessionLog': 'Остановить журнал сессии',
   'terminal.toolbar.timestampsEnable': 'Показать время',
+  'terminal.local.elevationCancelled': 'Права администратора не были предоставлены',
   'terminal.lines.numbersEnable': 'Показать номера строк',
   'terminal.lines.numbersDisable': 'Скрыть номера строк',
   'terminal.lines.panel': 'Переход к строке, копирование строк, метки',

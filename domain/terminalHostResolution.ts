@@ -93,6 +93,7 @@ function buildFallbackHostFromSession(
     localShellName: session.localShellName,
     localShellIcon: session.localShellIcon,
     localStartDir: session.localStartDir,
+    localElevated: session.localElevated,
   };
 }
 
@@ -110,6 +111,7 @@ const overlaySessionLocalShell = (session: TerminalSession, host: Host): Host =>
     localShellName: session.localShellName ?? host.localShellName,
     localShellIcon: session.localShellIcon ?? host.localShellIcon,
     localStartDir: session.localStartDir ?? host.localStartDir,
+    localElevated: session.localElevated ?? host.localElevated,
   };
 };
 

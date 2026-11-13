@@ -189,6 +189,9 @@ jobs:
       - name: Exercise two SSH password prompts in the desktop app
         run: node scripts/terminal-broadcast-ssh.live.cjs
 
+      - name: Exercise the administrator local terminal (cmd and PowerShell)
+        run: npx electron scripts/elevated-local-pty.live.test.cjs
+
       - name: Exercise terminal line numbers, marks and range copy in the desktop app
         env:
           NETCATTY_LINE_TOOLS_SCREENSHOT: "1"

@@ -86,6 +86,7 @@ export const enTerminalMessages: Messages = {
   'terminal.toolbar.startSessionLog': 'Start session log',
   'terminal.toolbar.stopSessionLog': 'Stop session log',
   'terminal.toolbar.timestampsEnable': 'Show timestamps',
+  'terminal.local.elevationCancelled': 'Administrator permission was not given',
   'terminal.lines.numbersEnable': 'Show line numbers',
   'terminal.lines.numbersDisable': 'Hide line numbers',
   'terminal.lines.panel': 'Go to line, copy lines, marks',

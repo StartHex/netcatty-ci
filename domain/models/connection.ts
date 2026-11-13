@@ -373,6 +373,8 @@ export interface Host {
   localShellName?: string;
   localShellIcon?: string;
   localStartDir?: string;
+  /** Local shell only: run as administrator (Windows) or as root through sudo (macOS, Linux). */
+  localElevated?: boolean;
   /** User-authored Markdown notes (project, hardware, region, etc.) */
   notes?: string;
   order?: number;

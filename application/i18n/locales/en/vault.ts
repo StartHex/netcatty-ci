@@ -1113,6 +1113,13 @@ export const enVaultMessages: Messages = {
   'localShell.field.shellEmpty': 'No shells found',
   'localShell.field.shellResolved': 'Runs {command}',
   'localShell.field.startDir': 'Start directory',
+  'localShell.field.elevated.windows': 'Run as administrator',
+  'localShell.field.elevated.windowsDesc': 'Windows asks for permission each time this shell is opened.',
+  'localShell.field.elevated.posix': 'Run as root (sudo)',
+  'localShell.field.elevated.posixDesc': 'The shell starts through sudo and asks for your password in the terminal.',
+  'qs.shellAsAdmin': 'Open as administrator',
+  'qs.shellAsAdminShort': 'Admin',
+  'qs.shellAdminName': '{name} (Admin)',
   'localShell.field.startDirPlaceholder': 'Inherit global start directory (home if unset)',
   'localShell.saveAndConnect': 'Save & Connect',
 

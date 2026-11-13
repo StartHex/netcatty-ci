@@ -212,6 +212,9 @@ module.exports = {
         'node_modules/@netcatty/plugin-contract/**/*',
         'node_modules/@netcatty/plugin-sdk/**/*',
         'electron/plugins/runtime/**/*',
+        // The elevated terminal helper runs as a plain node script from a
+        // real path and loads node-pty from beside it.
+        'electron/elevatedPty/**/*',
         'node_modules/ajv/**/*',
         'node_modules/ajv-formats/**/*',
         'node_modules/fast-deep-equal/**/*',

@@ -64,6 +64,7 @@ export const zhTWTerminalMessages: Messages = {
   'terminal.osc7Setup.failed': '目錄追蹤設定失敗',
   'terminal.osc7Setup.sent': '目錄追蹤設定已傳送到終端',
   'terminal.toolbar.timestampsEnable': '顯示時間戳',
+  'terminal.local.elevationCancelled': '未取得系統管理員權限',
   'terminal.lines.numbersEnable': '顯示行號',
   'terminal.lines.numbersDisable': '隱藏行號',
   'terminal.lines.panel': '跳到指定行、複製行範圍、行標記',

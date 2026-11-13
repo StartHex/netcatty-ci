@@ -8,6 +8,8 @@ export interface LocalTerminalOptions {
   shellName?: string;
   shellIcon?: string;
   localStartDir?: string;
+  /** Run as administrator (Windows) or as root through sudo. */
+  elevated?: boolean;
 }
 
 /**
@@ -58,6 +60,7 @@ export const createLocalTerminalSession = (
   localShellName: options?.shellName,
   localShellIcon: options?.shellIcon,
   localStartDir: options?.localStartDir,
+  ...(options?.elevated ? { localElevated: true } : {}),
 });
 
 export const snapshotSerialConfig = (
@@ -159,6 +162,7 @@ export const createHostTerminalSession = (
       // Settings directory the saved host inherits. Copy Tab overlays this
       // snapshot, so a later settings or vault edit cannot move the relaunch.
       localStartDir: host.localStartDir || "~",
+      ...(host.localElevated ? { localElevated: true } : {}),
     } : {}),
     ...(host.ephemeral ? { ephemeralHost: true } : {}),
     ...(host.autoOpenSftpPanel ? { autoOpenSidePanel: "sftp" as const } : {}),

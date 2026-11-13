@@ -1313,7 +1313,7 @@ export function AppSideEffects() {
 
   // Wrapper to create local terminal with logging
   const handleCreateLocalTerminal = useCallback((
-    shell?: { command: string; args?: string[]; name?: string; icon?: string },
+    shell?: { command: string; args?: string[]; name?: string; icon?: string; elevated?: boolean },
     options?: { localStartDir?: string },
   ) => {
     return handleCreateLocalTerminalImpl(

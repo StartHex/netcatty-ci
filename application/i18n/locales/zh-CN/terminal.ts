@@ -64,6 +64,7 @@ export const zhCNTerminalMessages: Messages = {
   'terminal.osc7Setup.failed': '目录追踪配置失败',
   'terminal.osc7Setup.sent': '目录追踪配置已发送到终端',
   'terminal.toolbar.timestampsEnable': '显示时间戳',
+  'terminal.local.elevationCancelled': '没有获得管理员权限',
   'terminal.lines.numbersEnable': '显示行号',
   'terminal.lines.numbersDisable': '隐藏行号',
   'terminal.lines.panel': '跳转到行、复制行范围、行标记',

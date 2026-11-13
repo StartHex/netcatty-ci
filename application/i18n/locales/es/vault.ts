@@ -1115,6 +1115,13 @@ export const esVaultMessages: Messages = {
   'localShell.field.shellEmpty': 'No se encontraron shells',
   'localShell.field.shellResolved': 'Ejecuta {command}',
   'localShell.field.startDir': 'Directorio de inicio',
+  'localShell.field.elevated.windows': 'Ejecutar como administrador',
+  'localShell.field.elevated.windowsDesc': 'Windows pide permiso cada vez que se abre esta shell.',
+  'localShell.field.elevated.posix': 'Ejecutar como root (sudo)',
+  'localShell.field.elevated.posixDesc': 'La shell se inicia con sudo y pide tu contraseña en la terminal.',
+  'qs.shellAsAdmin': 'Abrir como administrador',
+  'qs.shellAsAdminShort': 'Admin',
+  'qs.shellAdminName': '{name} (Admin)',
   'localShell.field.startDirPlaceholder': 'Heredar directorio inicial global (personal si no se configura)',
   'localShell.saveAndConnect': 'Guardar y conectar',
 

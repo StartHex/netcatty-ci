@@ -1151,6 +1151,13 @@ export const ruVaultMessages: Messages = {
   'localShell.field.shellEmpty': 'Оболочки не найдены',
   'localShell.field.shellResolved': 'Запускает {command}',
   'localShell.field.startDir': 'Начальный каталог',
+  'localShell.field.elevated.windows': 'Запускать от имени администратора',
+  'localShell.field.elevated.windowsDesc': 'Windows запрашивает разрешение при каждом открытии этой оболочки.',
+  'localShell.field.elevated.posix': 'Запускать от имени root (sudo)',
+  'localShell.field.elevated.posixDesc': 'Оболочка запускается через sudo и запрашивает пароль в терминале.',
+  'qs.shellAsAdmin': 'Открыть от имени администратора',
+  'qs.shellAsAdminShort': 'Админ',
+  'qs.shellAdminName': '{name} (админ)',
   'localShell.field.startDirPlaceholder': 'Использовать общий начальный каталог (иначе домашний)',
   'localShell.saveAndConnect': 'Сохранить и открыть',
 

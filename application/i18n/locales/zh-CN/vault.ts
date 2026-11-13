@@ -461,6 +461,13 @@ export const zhCNVaultMessages: Messages = {
   'localShell.field.shellEmpty': '未发现可用 Shell',
   'localShell.field.shellResolved': '启动 {command}',
   'localShell.field.startDir': '启动目录',
+  'localShell.field.elevated.windows': '以管理员身份运行',
+  'localShell.field.elevated.windowsDesc': '每次打开这个 Shell 时，Windows 会弹出权限确认。',
+  'localShell.field.elevated.posix': '以 root 身份运行（sudo）',
+  'localShell.field.elevated.posixDesc': 'Shell 通过 sudo 启动，会在终端里要求输入密码。',
+  'qs.shellAsAdmin': '以管理员身份打开',
+  'qs.shellAsAdminShort': '管理员',
+  'qs.shellAdminName': '{name}（管理员）',
   'localShell.field.startDirPlaceholder': '继承全局起始目录（未设置时为主目录）',
   'localShell.saveAndConnect': '保存并打开',
 
