@@ -15,6 +15,8 @@ export const zhTWVaultMessages: Messages = {
   'notes.action.newGroup': '新增資料夾',
   'notes.action.importMarkdown': '匯入 Markdown',
   'notes.action.exportNote': '匯出筆記',
+  'notes.action.openInTab': '在分頁中開啟',
+  'tabs.closeNoteAria': '關閉筆記分頁',
   'notes.area.label': '筆記分區',
   'notes.area.daily': '日常',
   'notes.area.organized': '整理',

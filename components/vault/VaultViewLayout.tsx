@@ -32,6 +32,7 @@ import {
 import { useConnectionLogsStore } from "../../application/state/connectionLogsStore";
 import { useDatabaseConnectionTester } from "../../application/state/useDatabaseWorkbench";
 import { useNotesStore } from "../../application/state/notesStore";
+import { noteTabStore } from '../../application/state/noteTabStore';
 import { LazyLoadBoundary } from "../ui/lazy-load-boundary";
 import { toast } from "../ui/toast";
 import { AppWordmark } from "../AppWordmark";
@@ -55,6 +56,8 @@ const VaultSectionLoading = () => (
  * subscription so Hosts/Keys churn and note publishes do not reconcile the
  * heavy NotesManager + MDXEditor tree.
  */
+const openNoteInTab = (noteId: string) => noteTabStore.open(noteId);
+
 function VaultNotesSection({
   NotesManager,
   hosts,
@@ -84,6 +87,7 @@ function VaultNotesSection({
       openNoteId={openNoteId}
       onOpenNoteIdHandled={onOpenNoteIdHandled}
       onOpenHost={onOpenHost}
+      onOpenNoteInTab={openNoteInTab}
     />
   );
 }

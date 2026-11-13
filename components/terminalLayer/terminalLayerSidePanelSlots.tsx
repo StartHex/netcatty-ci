@@ -16,6 +16,7 @@ import {
   subscribeNotesNoop,
   useNotesStore,
 } from '../../application/state/notesStore';
+import { noteTabStore } from '../../application/state/noteTabStore';
 import {
   getShellHistorySnapshot,
   subscribeShellHistory,
@@ -471,6 +472,8 @@ function SidePanelThemeSlotInner({
 export const SidePanelThemeSlot = memo(SidePanelThemeSlotInner);
 SidePanelThemeSlot.displayName = 'SidePanelThemeSlot';
 
+const openNoteInTab = (noteId: string) => noteTabStore.open(noteId);
+
 function SidePanelNotesSlotInner({
   tabId,
   ctx,
@@ -512,6 +515,7 @@ function SidePanelNotesSlotInner({
         isActive={isVisible}
         openNoteId={openNoteRequest?.noteId ?? null}
         openNoteRequestId={openNoteRequest?.requestId ?? null}
+        onOpenNoteInTab={openNoteInTab}
       />
     </div>
   );

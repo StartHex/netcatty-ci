@@ -8,6 +8,7 @@ import { useTrackShortcutModifierHeld } from '../application/state/useShortcutMo
 import type { EditorTabChrome } from '../application/state/editorTabStore';
 import { toDatabaseTabId, type DatabaseTabSummary } from '../application/state/databaseTabStore';
 import { toCurlTabId, type CurlTabSummary } from '../application/state/curlTabStore';
+import { toNoteTabId } from '../application/state/noteTabStore';
 import { collectSessionIds } from '../domain/workspace';
 import {
   appendHostFromWorkspaceDrop,
@@ -36,7 +37,7 @@ import { GlobalSftpTransferCenter } from './GlobalSftpTransferCenter';
 import { TopTabsQuickControls } from './TopTabsQuickControls';
 import {
   ActiveTabAutoScroller,
-  CurlTopTab,
+  CurlTopTab, NoteTopTab, type NoteTabChrome,
   DatabaseTopTab,
   EditorTopTab,
   LogViewTopTab,
@@ -185,6 +186,9 @@ interface TopTabsProps {
   onCloseDatabaseTab: (tabId: string) => void;
   curlTabs: readonly CurlTabSummary[];
   onCloseCurlTab: (tabId: string) => void;
+  /** Notes opened as tabs; `id` is the note id. */
+  noteTabs: readonly NoteTabChrome[];
+  onCloseNoteTab: (noteId: string) => void;
   onClosePluginViewTab: (tabId: string) => void;
   onRequestCloseEditorTab: (editorTabId: string) => void;
   onPopOutEditorTab?: (editorTabId: string) => void;
@@ -241,6 +245,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
   onCloseDatabaseTab,
   curlTabs,
   onCloseCurlTab,
+  noteTabs,
+  onCloseNoteTab,
   onClosePluginViewTab,
   onRequestCloseEditorTab,
   onPopOutEditorTab,
@@ -789,6 +795,11 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     [curlTabs],
   );
 
+  const noteTabMap = useMemo(
+    () => new Map(noteTabs.map((tab) => [toNoteTabId(tab.id), tab])),
+    [noteTabs],
+  );
+
   // fileName → count, for the rename-disambiguation suffix in the render loop.
   // Memoed so we don't do a per-tab O(n) filter on every render (was O(n²)).
   const editorTabFileNameCounts = useMemo(() => {
@@ -812,6 +823,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
       if (databaseTab) return { type: 'database' as const, id: tabId, databaseTab };
       const curlTab = curlTabMap.get(tabId);
       if (curlTab) return { type: 'curl' as const, id: tabId, curlTab };
+      const noteTab = noteTabMap.get(tabId);
+      if (noteTab) return { type: 'note' as const, id: tabId, noteTab };
       const session = orphanSessionMap.get(tabId);
       const workspace = workspaceMap.get(tabId);
       const logView = logViewMap.get(tabId);
@@ -826,7 +839,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
       }
       return null;
     }).filter(Boolean);
-  }, [orderedTabs, editorTabMap, pluginViewTabMap, databaseTabMap, curlTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
+  }, [orderedTabs, editorTabMap, pluginViewTabMap, databaseTabMap, curlTabMap, noteTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
 
   // Bulk-close menu items shared by session and workspace context menus.
   // Anchor is the tab the user right-clicked on (matches VSCode/JetBrains UX).
@@ -969,6 +982,31 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             key={tabId}
             tab={item.curlTab}
             onClose={onCloseCurlTab}
+            renderBulkCloseItems={renderBulkCloseItems}
+            t={t}
+            isBeingDragged={draggingSessionId === tabId}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={tabShiftStyles[tabId] || emptyTabStyle}
+            showDropIndicatorBefore={dropIndicator?.tabId === tabId && dropIndicator.position === 'before'}
+            showDropIndicatorAfter={dropIndicator?.tabId === tabId && dropIndicator.position === 'after'}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            tabAnimationClass={getTabAnimationClass(tabId)}
+            shortcutNumber={tabShortcutNumbers?.get(tabId)}
+          />
+        );
+      }
+
+      if (item.type === 'note') {
+        const tabId = item.id;
+        return (
+          <NoteTopTab
+            key={tabId}
+            tab={item.noteTab}
+            onClose={onCloseNoteTab}
             renderBulkCloseItems={renderBulkCloseItems}
             t={t}
             isBeingDragged={draggingSessionId === tabId}
@@ -1401,6 +1439,8 @@ export const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean
     prev.databaseTabs === next.databaseTabs &&
     prev.curlTabs === next.curlTabs &&
     prev.onCloseCurlTab === next.onCloseCurlTab &&
+    prev.noteTabs === next.noteTabs &&
+    prev.onCloseNoteTab === next.onCloseNoteTab &&
     prev.onCloseDatabaseTab === next.onCloseDatabaseTab &&
     prev.draggingSessionId === next.draggingSessionId &&
     prev.isMacClient === next.isMacClient &&

@@ -15,6 +15,8 @@ export const esVaultMessages: Messages = {
   'notes.action.newGroup': 'Nueva carpeta',
   'notes.action.importMarkdown': 'Importar Markdown',
   'notes.action.exportNote': 'Exportar nota',
+  'notes.action.openInTab': 'Abrir en una pestaña',
+  'tabs.closeNoteAria': 'Cerrar pestaña de nota',
   'notes.area.label': 'Área de notas',
   'notes.area.daily': 'Diario',
   'notes.area.organized': 'Organizado',

@@ -22,6 +22,7 @@ import { captureInheritedCwd } from '../state/inheritedCwd';
 import { fromEditorTabId, isEditorTabId } from '../state/activeTabStore';
 import { databaseTabStore, fromDatabaseTabId, isDatabaseTabId } from '../state/databaseTabStore';
 import { curlTabStore, fromCurlTabId, isCurlTabId } from '../state/curlTabStore';
+import { fromNoteTabId, isNoteTabId, noteTabStore as sharedNoteTabStore } from '../state/noteTabStore';
 import { isPluginViewEditingTarget } from '../state/pluginKeybindings';
 import { resolveBatchTabCloseFocus } from '../state/pluginViewTabStore';
 
@@ -789,6 +790,7 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace,
     confirmIfBusyLocalTerminal, logViews, sessions, workspaces,
     activeTabStore, editorTabStore, pluginViewTabStore, databaseTabStore, curlTabStore,
+    noteTabStore = sharedNoteTabStore,
     handleRequestCloseEditorTabRef, findEditorSftpOwnerTabId, orderedTabsWithEditors,
   } = getCtx();
   if (targetIds.length === 0) return true;
@@ -799,9 +801,10 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     const pluginIds = targetIds.filter((id) => pluginViewTabStore.getTab(id));
     const databaseIds = targetIds.filter((id) => isDatabaseTabId(id));
     const curlIds = targetIds.filter((id) => isCurlTabId(id));
+    const noteIds = targetIds.filter((id) => isNoteTabId(id));
     const editorIds = targetIds.filter(isEditorTabId);
     const regularIds = targetIds.filter(
-      (id) => !pluginViewTabStore.getTab(id) && !isEditorTabId(id) && !isDatabaseTabId(id) && !isCurlTabId(id),
+      (id) => !pluginViewTabStore.getTab(id) && !isEditorTabId(id) && !isDatabaseTabId(id) && !isCurlTabId(id) && !isNoteTabId(id),
     );
     // Cancel busy-terminal confirmation before making any changes, including editors.
     if (regularIds.length && !await confirmIfBusyLocalTerminal(
@@ -833,8 +836,9 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     for (const id of pluginIds) pluginViewTabStore.close(id);
     for (const id of databaseIds) databaseTabStore.requestClose(fromDatabaseTabId(id));
     for (const id of curlIds) curlTabStore.requestClose(fromCurlTabId(id));
+    for (const id of noteIds) noteTabStore.close(fromNoteTabId(id));
 
-    const closingTabIds = new Set([...effectiveRegularIds, ...closedEditorIds, ...pluginIds, ...databaseIds, ...curlIds]);
+    const closingTabIds = new Set([...effectiveRegularIds, ...closedEditorIds, ...pluginIds, ...databaseIds, ...curlIds, ...noteIds]);
     if (closingTabIds.has(activeBeforeClose)) {
       activeTabStore.setActiveTabId(resolveBatchTabCloseFocus({
         orderedTabIds: orderedTabsWithEditors,
@@ -911,6 +915,14 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
           const index = orderedTabs.indexOf(currentId);
           const next = orderedTabs[index - 1] ?? orderedTabs[index + 1] ?? 'vault';
           setActiveTabId(next === currentId ? 'vault' : next);
+          break;
+        }
+
+        if (isNoteTabId(currentId)) {
+          const index = orderedTabs.indexOf(currentId);
+          const next = orderedTabs[index - 1] ?? orderedTabs[index + 1] ?? 'vault';
+          setActiveTabId(next === currentId ? 'vault' : next);
+          sharedNoteTabStore.close(fromNoteTabId(currentId));
           break;
         }
 

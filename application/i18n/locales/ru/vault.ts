@@ -15,6 +15,8 @@ export const ruVaultMessages: Messages = {
   'notes.action.newGroup': 'Новая папка',
   'notes.action.importMarkdown': 'Импорт Markdown',
   'notes.action.exportNote': 'Экспорт заметки',
+  'notes.action.openInTab': 'Открыть во вкладке',
+  'tabs.closeNoteAria': 'Закрыть вкладку заметки',
   'notes.area.label': 'Раздел заметок',
   'notes.area.daily': 'Ежедневные',
   'notes.area.organized': 'Упорядоченные',

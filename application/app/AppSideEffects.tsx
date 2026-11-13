@@ -4,6 +4,7 @@ import { publishAppLocalUi } from './appLocalUiStore';
 import { activeTabStore, toEditorTabId, fromEditorTabId, isEditorTabId } from '../state/activeTabStore';
 import { databaseTabStore, toDatabaseTabId, useDatabaseTabs } from '../state/databaseTabStore';
 import { curlTabStore, toCurlTabId, useCurlTabs } from '../state/curlTabStore';
+import { noteTabStore, toNoteTabId, useNoteTabIds } from '../state/noteTabStore';
 import { useAutoSync } from '../state/useAutoSync';
 import { useManagedSourceSync } from '../state/useManagedSourceSync';
 import { usePortForwardingState } from '../state/usePortForwardingState';
@@ -130,6 +131,7 @@ export function AppSideEffects() {
   const pluginViewTabs = usePluginViewTabs();
   const databaseTabs = useDatabaseTabs();
   const curlTabs = useCurlTabs();
+  const noteTabIds = useNoteTabIds();
 
   const [isQuickSwitcherOpen, setIsQuickSwitcherOpen] = useState(false);
   const [isCreateWorkspaceOpen, setIsCreateWorkspaceOpen] = useState(false);
@@ -1069,9 +1071,13 @@ export function AppSideEffects() {
     () => curlTabs.map((tab) => toCurlTabId(tab.id)),
     [curlTabs],
   );
+  const noteTabTopIds = useMemo(
+    () => noteTabIds.map((noteId) => toNoteTabId(noteId)),
+    [noteTabIds],
+  );
   const additionalWorkTabIds = useMemo(
-    () => [...editorTabTopIds, ...pluginViewTabIds, ...databaseTabTopIds, ...curlTabTopIds],
-    [editorTabTopIds, pluginViewTabIds, databaseTabTopIds, curlTabTopIds],
+    () => [...editorTabTopIds, ...pluginViewTabIds, ...databaseTabTopIds, ...curlTabTopIds, ...noteTabTopIds],
+    [editorTabTopIds, pluginViewTabIds, databaseTabTopIds, curlTabTopIds, noteTabTopIds],
   );
 
   // 顶层标签顺序需要包含编辑器标签，供顶部标签和编辑器邻居计算使用。
@@ -1098,7 +1104,7 @@ export function AppSideEffects() {
       () => ({
         closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace,
         confirmIfBusyLocalTerminal, logViews, sessions, workspaces,
-        activeTabStore, editorTabStore, pluginViewTabStore, databaseTabStore, curlTabStore,
+        activeTabStore, editorTabStore, pluginViewTabStore, databaseTabStore, curlTabStore, noteTabStore,
         handleRequestCloseEditorTabRef, findEditorSftpOwnerTabId, orderedTabsWithEditors,
       }),
       targetIds,

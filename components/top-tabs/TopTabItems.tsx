@@ -3,6 +3,8 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState
 import { activeTabStore, useActiveTabId, useIsTabActive } from '../../application/state/activeTabStore';
 import { databaseTabStore, toDatabaseTabId, type DatabaseTabSummary } from '../../application/state/databaseTabStore';
 import { curlTabStore, toCurlTabId, type CurlTabSummary } from '../../application/state/curlTabStore';
+import { toNoteTabId } from '../../application/state/noteTabStore';
+import type { NoteTabChrome } from '../../application/state/noteTabChrome';
 import {
   useAnySessionActivity,
   useSessionActivity,
@@ -871,6 +873,129 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
   );
 });
 CurlTopTab.displayName = 'CurlTopTab';
+
+export type { NoteTabChrome };
+
+interface NoteTopTabProps {
+  /** `id` is the note id. */
+  tab: NoteTabChrome;
+  onClose: (noteId: string) => void;
+  renderBulkCloseItems: RenderBulkCloseItems;
+  t: TranslateFn;
+  isBeingDragged: boolean;
+  isDraggingForReorder: boolean;
+  shiftStyle: React.CSSProperties;
+  showDropIndicatorBefore: boolean;
+  showDropIndicatorAfter: boolean;
+  onTabDragStart: (e: React.DragEvent, tabId: string) => void;
+  onTabDragEnd: () => void;
+  onTabDragOver: (e: React.DragEvent, tabId: string) => void;
+  onTabDragLeave: (e: React.DragEvent) => void;
+  onTabDrop: (e: React.DragEvent, targetTabId: string) => void;
+  tabAnimationClass?: string;
+  shortcutNumber?: number;
+}
+
+export const NoteTopTab: React.FC<NoteTopTabProps> = memo(({
+  tab,
+  onClose,
+  renderBulkCloseItems,
+  t,
+  isBeingDragged,
+  isDraggingForReorder,
+  shiftStyle,
+  showDropIndicatorBefore,
+  showDropIndicatorAfter,
+  onTabDragStart,
+  onTabDragEnd,
+  onTabDragOver,
+  onTabDragLeave,
+  onTabDrop,
+  tabAnimationClass,
+  shortcutNumber,
+}) => {
+  const tabId = toNoteTabId(tab.id);
+  const title = tab.title || t('notes.title.placeholder');
+  const isActive = useIsTabActive(tabId);
+  const activate = useCallback(() => {
+    activeTabStore.setActiveTabId(tabId);
+  }, [tabId]);
+  const close = useCallback((event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    onClose(tab.id);
+  }, [onClose, tab.id]);
+  const tabBody = (
+    <div
+      data-tab-id={tabId}
+      data-tab-type="note"
+      data-state={isActive ? 'active' : 'inactive'}
+      data-active={topTabActiveValue(isActive)}
+      onClick={activate}
+      onMouseDown={handleTabDragThresholdMouseDown}
+      onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
+      onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
+      draggable
+      onDragStart={(event) => {
+        handleTabDragThresholdDragStart(event);
+        onTabDragStart(event, tabId);
+      }}
+      onDrag={(event) => {
+        if (!handleTabDragThresholdDrag(event)) return;
+        onTabDragStart(event, tabId);
+      }}
+      onDragEnd={(event) => {
+        handleTabDragThresholdRelease(event, activate);
+        onTabDragEnd();
+      }}
+      onDragOver={(event) => onTabDragOver(event, tabId)}
+      onDragLeave={onTabDragLeave}
+      onDrop={(event) => onTabDrop(event, tabId)}
+      className={cn(
+        TOP_TAB_ITEM_CLASS,
+        'netcatty-tab relative h-7 min-w-[140px] max-w-[240px] flex-shrink-0 cursor-pointer items-center justify-between gap-2 overflow-hidden rounded-t-md pl-3 pr-2 text-xs font-semibold app-no-drag',
+        'flex transition-transform duration-150',
+        isBeingDragged && isDraggingForReorder && 'scale-95 opacity-40',
+        tabAnimationClass,
+      )}
+      style={{ ...shiftStyle, ...resolveTopTabChromeStyle(isActive) } as React.CSSProperties}
+    >
+      {showDropIndicatorBefore && isDraggingForReorder && <div className="absolute -left-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+      {showDropIndicatorAfter && isDraggingForReorder && <div className="absolute -right-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        {shortcutNumber != null ? (
+          <TabShortcutNumberBadge number={shortcutNumber} />
+        ) : (
+          <FileText size={12} className="shrink-0 text-muted-foreground" />
+        )}
+        <span className="truncate leading-5">{title}</span>
+      </div>
+      <button
+        onMouseDown={handleTabCloseButtonMouseDown}
+        onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
+        aria-label={t('tabs.closeNoteAria', { title })}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+  return (
+    <ContextMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ContextMenuTrigger asChild>{tabBody}</ContextMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{title}</TooltipContent>
+      </Tooltip>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
+        {renderBulkCloseItems(tabId)}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+});
+NoteTopTab.displayName = 'NoteTopTab';
 
 interface EditorTopTabProps {
   tabId: string;

@@ -15,6 +15,8 @@ export const enVaultMessages: Messages = {
   'notes.action.newGroup': 'New Folder',
   'notes.action.importMarkdown': 'Import Markdown',
   'notes.action.exportNote': 'Export Note',
+  'notes.action.openInTab': 'Open in a tab',
+  'tabs.closeNoteAria': 'Close note tab',
   'notes.area.label': 'Note area',
   'notes.area.daily': 'Daily',
   'notes.area.organized': 'Organized',

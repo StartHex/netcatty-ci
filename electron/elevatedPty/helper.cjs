@@ -14,6 +14,8 @@
 // matched, and exits when that shell or the pipe ends.
 
 const net = require("node:net");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { FRAME, encodeFrame, encodeJsonFrame, createFrameDecoder, parseJsonPayload } = require("./protocol.cjs");
 
 function readArg(name) {
@@ -36,10 +38,34 @@ const send = (frame) => {
   if (!socket.destroyed) socket.write(frame);
 };
 
+let shellExited = false;
+
+/**
+ * Ends the shell and everything it started. node-pty's own kill is
+ * asynchronous on Windows and would be cut short by this process exiting,
+ * which would leave an elevated shell running with no terminal attached.
+ */
+function endShell() {
+  if (!proc || shellExited) return;
+  const pid = proc.pid;
+  try { proc.kill(); } catch { /* already gone */ }
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+    spawnSync(path.win32.join(root, "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      timeout: 5000,
+      windowsHide: true,
+    });
+  } catch {
+    // Nothing more can be done from here.
+  }
+}
+
 function finish(code) {
   if (finished) return;
   finished = true;
-  try { proc?.kill(); } catch { /* already gone */ }
+  endShell();
   socket.end(() => process.exit(code));
   setTimeout(() => process.exit(code), 1500).unref();
 }
@@ -74,6 +100,7 @@ function spawnShell(request) {
   send(encodeJsonFrame(FRAME.READY, { pid: proc.pid }));
   proc.onData((data) => send(encodeFrame(FRAME.OUTPUT, data)));
   proc.onExit(({ exitCode, signal }) => {
+    shellExited = true;
     send(encodeJsonFrame(FRAME.EXIT, { exitCode, signal }));
     finish(0);
   });

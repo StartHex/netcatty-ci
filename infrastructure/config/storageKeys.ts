@@ -74,6 +74,8 @@ export const STORAGE_KEY_HTTP_REQUESTS = 'netcatty_http_requests_v1';
 /** Curl tool: every known collection folder path (names are not secret, stored in clear). */
 export const STORAGE_KEY_CURL_FOLDERS = 'netcatty_curl_folders_v1';
 export const STORAGE_KEY_HTTP_TABS = 'netcatty_http_tabs_v1';
+/** Note ids opened as top tabs. */
+export const STORAGE_KEY_NOTE_TABS = 'netcatty_note_tabs_v1';
 export const STORAGE_KEY_HTTP_HISTORY = 'netcatty_http_history_v1';
 /** Curl tool, device-local: collapsed folder paths in the collection tree. */
 export const STORAGE_KEY_CURL_FOLDER_UI = 'netcatty_curl_folder_ui_v1';

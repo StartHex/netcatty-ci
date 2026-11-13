@@ -15,6 +15,8 @@ export const zhCNVaultMessages: Messages = {
   'notes.action.newGroup': '新建文件夹',
   'notes.action.importMarkdown': '导入 Markdown',
   'notes.action.exportNote': '导出笔记',
+  'notes.action.openInTab': '在标签页中打开',
+  'tabs.closeNoteAria': '关闭笔记标签',
   'notes.area.label': '笔记分区',
   'notes.area.daily': '日常',
   'notes.area.organized': '整理',

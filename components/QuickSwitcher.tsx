@@ -7,6 +7,7 @@ import {
   Minimize2,
   Plus,
   Search,
+  FileText,
   ShieldCheck,
   Terminal,
   TerminalSquare,
@@ -21,6 +22,8 @@ import type { PaneMagnificationState } from "../domain/paneMagnification";
 import { isSwitcherQuickConnectInput } from "../domain/quickConnect";
 import { matchesSearchQuery } from "../lib/searchMatcher";
 import { buildQuickSwitcherShells, useDiscoveredShells, getShellIconPath, isMonochromeShellIcon } from "../lib/useDiscoveredShells";
+import { useNotesStore } from "../application/state/notesStore";
+import { noteTabStore } from "../application/state/noteTabStore";
 import { usePluginContributions } from "../application/state/usePluginContributions";
 import { requestOpenPluginView } from "./plugins/PluginContributionHost";
 import { PluginContributionIcon } from "./plugins/PluginContributionIcon";
@@ -41,7 +44,7 @@ type QuickSwitcherItemBase = {
 
 type QuickSwitcherItem = QuickSwitcherItemBase & (
   | { type: "plugin-command"; commandId: string }
-  | { type: "host" | "tab" | "workspace" | "action" | "shell" | "plugin-view" | "quick-connect" | "database-tab" | "database" | "curl-tab" | "curl"; commandId?: never }
+  | { type: "host" | "tab" | "workspace" | "action" | "shell" | "plugin-view" | "quick-connect" | "database-tab" | "database" | "curl-tab" | "curl" | "note"; commandId?: never }
 );
 
 export function buildPaneMagnificationPaletteAction(
@@ -332,6 +335,15 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     return curlTabs.filter((tab) => matchesSearchQuery(trimmedQuery, tab.title, tab.subtitle ?? '', 'curl'));
   }, [curlTabs, trimmedQuery]);
 
+  // Notes are searched by title; picking one opens it in its own tab.
+  const { notes: vaultNotes } = useNotesStore();
+  const filteredNotes = useMemo(() => {
+    if (!trimmedQuery) return [];
+    return vaultNotes
+      .filter((note) => matchesSearchQuery(trimmedQuery, note.title, note.group ?? '', 'note'))
+      .slice(0, 20);
+  }, [trimmedQuery, vaultNotes]);
+
   const filteredCurlRequests = useMemo(() => {
     if (!trimmedQuery) return [];
     return curlRequests.filter((request) =>
@@ -404,7 +416,8 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
       || filteredDatabaseTabs.length > 0
       || filteredDatabaseConnections.length > 0
       || filteredCurlTabs.length > 0
-      || filteredCurlRequests.length > 0;
+      || filteredCurlRequests.length > 0
+      || filteredNotes.length > 0;
 
     // The address row is the default Enter target only when nothing else matches.
     // Matching hosts and open tabs stay ahead of it.
@@ -450,6 +463,14 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
           altCommand: request.subtitle,
         }),
       );
+      filteredNotes.forEach((note) =>
+        pushItem({
+          type: "note",
+          id: note.id,
+          title: note.title || t("notes.title.placeholder"),
+          altCommand: note.group || undefined,
+        }),
+      );
       filteredOrphanSessions.forEach((s) =>
         pushItem({ type: "tab", id: s.id, data: s }),
       );
@@ -489,6 +510,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     filteredDatabaseConnections,
     filteredDatabaseTabs,
     filteredCurlRequests,
+    filteredNotes,
     filteredCurlTabs,
     filteredOrphanSessions,
     filteredShells,
@@ -567,6 +589,10 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
         break;
       case "curl":
         onOpenCurlRequest?.(item.id);
+        onClose();
+        break;
+      case "note":
+        noteTabStore.open(item.id);
         onClose();
         break;
       case "tab":
@@ -826,6 +852,28 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                       {item.title ?? item.id}
                     </span>
                     {item.type === "curl" && item.altCommand ? (
+                      <span className="shrink-0 truncate text-xs text-muted-foreground">{item.altCommand}</span>
+                    ) : null}
+                  </div>
+                );
+              }
+
+              if (item.type === "note") {
+                return (
+                  <div
+                    className={rowClass}
+                    onClick={() => {
+                      noteTabStore.open(item.id);
+                      onClose();
+                    }}
+                  >
+                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground">
+                      <FileText size={16} />
+                    </div>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                      {item.title ?? item.id}
+                    </span>
+                    {item.altCommand ? (
                       <span className="shrink-0 truncate text-xs text-muted-foreground">{item.altCommand}</span>
                     ) : null}
                   </div>

@@ -196,7 +196,12 @@ export interface NotesManagerProps {
   onUpdateNotes: (notes: VaultNote[]) => void;
   onUpdateNoteGroups: (groups: string[]) => void;
   onOpenHost?: (host: Host, source?: { noteId: string }) => void;
-  displayMode?: "full" | "sidebar";
+  /** "tab" shows one pinned note with no tree: the body of a note top tab. */
+  displayMode?: "full" | "sidebar" | "tab";
+  /** Tab mode: the note this tab shows. */
+  pinnedNoteId?: string | null;
+  /** Opens a note in its own top tab. Offered on every note when given. */
+  onOpenNoteInTab?: (noteId: string) => void;
   /** When false (hidden retained mount), flush any pending draft immediately. */
   isActive?: boolean;
   openNoteId?: string | null;
@@ -471,12 +476,15 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   displayMode = "full",
   isActive = true,
   openNoteId = null,
+  pinnedNoteId = null,
+  onOpenNoteInTab,
   openNoteRequestId = null,
   onOpenNoteIdHandled,
 }) => {
   const { t, locale } = useI18n();
   const { openExternal } = useApplicationBackend();
   const isSidebarMode = displayMode === "sidebar";
+  const isTabMode = displayMode === "tab";
   const initialOpenNoteId = openNoteId && notes.some((note) => note.id === openNoteId)
     ? openNoteId
     : null;
@@ -486,7 +494,9 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   const [searchFocus, setSearchFocus] = useState<NoteSearchFocus | null>(null);
   const [editorSearchCount, setEditorSearchCount] = useState<{ noteId: string | null; count: number } | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => initialOpenNoteId ?? (isSidebarMode ? null : notes[0]?.id ?? null));
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => (
+    isTabMode ? pinnedNoteId ?? null : initialOpenNoteId ?? (isSidebarMode ? null : notes[0]?.id ?? null)
+  ));
   const [noteEditorMode, setNoteEditorMode] = useStoredString<NoteEditorMode>(
     STORAGE_KEY_VAULT_NOTES_EDITOR_MODE,
     "edit",
@@ -832,6 +842,16 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
     setSelectedGroup(nextSelection.selectedGroup);
     setOverlayNoteId(nextSelection.overlayNoteId);
   }, [isSidebarMode, selectedGroup, selectedNoteId, sortedNotes]);
+
+  // A note tab shows its own note and nothing else. Switching tabs changes the
+  // pinned note: save what was being typed, then show the new one.
+  useEffect(() => {
+    if (!isTabMode || !pinnedNoteId || selectedNoteId === pinnedNoteId) return;
+    if (!sortedNotes.some((note) => note.id === pinnedNoteId)) return;
+    flushNoteDraftRef.current();
+    setSelectedNoteId(pinnedNoteId);
+    setSelectedGroup(null);
+  }, [isTabMode, pinnedNoteId, selectedNoteId, sortedNotes]);
 
   useEffect(() => {
     if (!overlayNoteId || sortedNotes.some((note) => note.id === overlayNoteId)) return;
@@ -1464,6 +1484,13 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
       areaActions.push({ label: t("notes.area.action.clearOrganized"), action: () => clearNoteOrganizedMark(note.id) });
     }
     const actions: Array<{ label: string; action: () => void; destructive?: boolean }> = [
+      ...(onOpenNoteInTab ? [{
+        label: t("notes.action.openInTab"),
+        action: () => {
+          flushNoteDraft();
+          onOpenNoteInTab(note.id);
+        },
+      }] : []),
       {
         label: t("common.rename"),
         action: () => setEditingNoteId(note.id),
@@ -1688,6 +1715,13 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
               setSelectedNoteId(nextSelection.selectedNoteId);
               setSelectedGroup(nextSelection.selectedGroup);
               setOverlayNoteId(nextSelection.overlayNoteId);
+              // On the notes page a click opens the note in its own tab, the
+              // way saved databases and requests open, so it stays one click
+              // away while working in a terminal.
+              if (!isSidebarMode && onOpenNoteInTab) {
+                flushNoteDraft();
+                onOpenNoteInTab(note.id);
+              }
             }}
               actions={(
                 <HoverActionMenu>
@@ -1859,7 +1893,7 @@ export const NotesManager: React.FC<NotesManagerProps> = ({
   };
   const hasSearch = query.trim().length > 0;
   const canExpandCollapse = allGroupPaths.length > 0 && !hasSearch;
-  const shouldShowNotesTree = isSidebarMode || sortedNotes.length > 0;
+  const shouldShowNotesTree = !isTabMode && (isSidebarMode || sortedNotes.length > 0);
 
   const handleTreeResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();

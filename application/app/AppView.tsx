@@ -47,6 +47,8 @@ import { getAvailablePaneMagnificationController } from '../../domain/paneMagnif
 import { pluginViewTabStore, usePluginViewTabs } from '../state/pluginViewTabStore';
 import { databaseTabStore, toDatabaseTabId, useDatabaseTabs } from '../state/databaseTabStore';
 import { curlTabStore, toCurlTabId, useCurlTabs } from '../state/curlTabStore';
+import { noteTabStore, toNoteTabId } from '../state/noteTabStore';
+import { useNoteTabChrome } from '../state/noteTabChrome';
 import { buildPluginSettingScopeCatalog } from '../state/usePluginSettingScopeCatalog';
 import { useWorkSurfaceHostEditor } from '../state/useWorkSurfaceHostEditor';
 import { QuickSwitcherOverlay } from './QuickSwitcherOverlay';
@@ -233,6 +235,7 @@ function AppViewInner({ domains }: AppViewProps) {
   const pluginViewTabs = usePluginViewTabs();
   const databaseTabs = useDatabaseTabs();
   const curlTabs = useCurlTabs();
+  const noteTabs = useNoteTabChrome();
   // Merge domain slices once per AppView render. AppView only re-renders when a
   // domain slice identity changes (see appViewDomainsEqual). Depend on the
   // domain bag so the hook graph stays honest; bag identity only changes when
@@ -290,7 +293,7 @@ function AppViewInner({ domains }: AppViewProps) {
     toggleBroadcast, toggleScriptsSidePanelRef, toggleSidePanelRef, terminalPaneMagnificationRef, sftpPaneMagnificationRef, toggleWorkspaceViewMode, unmanageSource,
     readPersistedHosts, readPersistedManagedSources, updateCustomGroups, updateGroupConfigs, updateHostDistro, updateHosts, updateIdentities, updateKeys, updateKnownHosts, updateManagedSources,
     updateProxyProfiles, updateOtpAuthenticators, updateSnippetPackages, updateSnippets, updateSplitSizes, updateTerminalSetting, vaultFocusRequest, workspaceRenameTarget, workspaces,
-    VaultViewContainer, SftpViewMount, TerminalLayerMount, LogViewWrapper, DatabaseWorkbenchMount, CurlClientMount,
+    VaultViewContainer, SftpViewMount, TerminalLayerMount, LogViewWrapper, DatabaseWorkbenchMount, CurlClientMount, NoteTabsMount,
   } = ctx;
 
   // Chrome-visible settings slice comes from settingsChromeStore, not from the
@@ -445,6 +448,16 @@ function AppViewInner({ domains }: AppViewProps) {
       const next = orderedTabsWithEditors[index - 1] ?? orderedTabsWithEditors[index + 1] ?? 'vault';
       activeTabStore.setActiveTabId(next === topId ? 'vault' : next);
     }
+  }, [orderedTabsWithEditors]);
+
+  const handleCloseNoteTab = useCallback((noteId: string) => {
+    const topId = toNoteTabId(noteId);
+    if (activeTabStore.getActiveTabId() === topId) {
+      const index = orderedTabsWithEditors.indexOf(topId);
+      const next = orderedTabsWithEditors[index - 1] ?? orderedTabsWithEditors[index + 1] ?? 'vault';
+      activeTabStore.setActiveTabId(next === topId ? 'vault' : next);
+    }
+    noteTabStore.close(noteId);
   }, [orderedTabsWithEditors]);
 
   const handleCloseCurlTab = useCallback((tabId: string) => {
@@ -623,6 +636,8 @@ function AppViewInner({ domains }: AppViewProps) {
         onCloseDatabaseTab={handleCloseDatabaseTab}
         curlTabs={curlTabs}
         onCloseCurlTab={handleCloseCurlTab}
+        noteTabs={noteTabs}
+        onCloseNoteTab={handleCloseNoteTab}
         onRequestCloseEditorTab={handleRequestCloseEditorTab}
         onPopOutEditorTab={handlePopOutEditorTab}
         onFocusEditorWindowTab={focusEditorWindowTab}
@@ -887,6 +902,8 @@ function AppViewInner({ domains }: AppViewProps) {
         />
 
         <CurlClientMount requests={curlRequests} onUpdateRequests={updateCurlRequests} />
+
+        <NoteTabsMount hosts={hosts} onOpenHost={handleConnectToHost} />
 
         {/* Log Views - readonly terminal replays. The latest log body comes
             from connectionLogsStore inside AppLogViewSurface. */}
