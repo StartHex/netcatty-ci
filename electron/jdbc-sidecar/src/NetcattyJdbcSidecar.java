@@ -258,6 +258,8 @@ public final class NetcattyJdbcSidecar {
     }
   }
 
+  private static final int MAX_SCHEMA_TABLES = 100000;
+
   private static void metaTables(String id, Map<String, String> params) throws Exception {
     Connection connection = connection(params);
     String schema = params.get("schema");
@@ -269,7 +271,9 @@ public final class NetcattyJdbcSidecar {
     try (ResultSet resultSet =
         connection.getMetaData().getTables(null, schema, "%", new String[] {"TABLE", "VIEW"})) {
       int rows = 0;
-      while (resultSet.next() && rows < 5000) {
+      // Not a result set: the schema panel needs every table, or its search
+      // cannot find the ones past the cut-off.
+      while (resultSet.next() && rows < MAX_SCHEMA_TABLES) {
         out.println("ROW\t" + id
             + "\t" + encode(resultSet.getString("TABLE_SCHEM") == null ? "" : resultSet.getString("TABLE_SCHEM"))
             + "\t" + encode(resultSet.getString("TABLE_NAME"))

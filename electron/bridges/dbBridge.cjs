@@ -164,6 +164,12 @@ function buildSelectResult(rowObjects, fields, maxRows, startedAt) {
 
 const DEFAULT_MAX_ROWS = 1000;
 const HARD_MAX_ROWS = 5000;
+/**
+ * Tables listed in the schema panel. This is not a result set, so the row
+ * cap above does not apply: a schema with more tables than that used to be
+ * cut off, and the missing tables could not be found by the panel's search.
+ */
+const SCHEMA_TABLE_LIMIT = 100000;
 const DEFAULT_TIMEOUT_MS = 30000;
 const CONNECT_TIMEOUT_MS = 15000;
 /** Upper bound for a test / connect round-trip (connect + version query). */
@@ -791,7 +797,7 @@ function createOracleSession(target) {
           "where owner not in ('SYS', 'SYSTEM', 'XDB', 'MDSYS', 'CTXSYS', 'ORDSYS') " +
           "order by owner, table_name",
         [],
-        { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: 5000 },
+        { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: SCHEMA_TABLE_LIMIT },
       );
       return (result.rows || []).map((row) => ({
         schema: String(row[0] || ""),
@@ -1302,7 +1308,7 @@ function createSqlServerSession(target) {
         instance,
         "select table_schema as [schema], table_name as [name], table_type as [type] " +
           "from information_schema.tables order by table_schema, table_name",
-        HARD_MAX_ROWS,
+        SCHEMA_TABLE_LIMIT,
       );
       return result.rows.map((row) => ({
         schema: String(row[0] || ""),
