@@ -102,6 +102,9 @@ permissions:
   pull-requests: read
 
 env:
+  # Fork: fail a build instead of shipping a package without the JDBC
+  # support jar (a build machine without a JDK used to skip it silently).
+  NETCATTY_REQUIRE_JDBC_SIDECAR: "1"
   # npm retries only transient registry fetches; deterministic install or
   # postinstall failures still fail immediately.
   NPM_CONFIG_FETCH_RETRIES: "4"
@@ -464,7 +467,10 @@ jobs:
             dpkg fakeroot \
             fuse fuse-libs gtk3 nss libXScrnSaver libXtst alsa-lib \
             at-spi2-atk libdrm mesa-libgbm libX11 libX11-xcb libxcb \
-            mesa-libGL pango cairo
+            mesa-libGL pango cairo \
+            java-17-openjdk-devel
+          # Fork: the JDK compiles the JDBC support jar the database module
+          # needs; without it the package ships with JDBC connections broken.
           # gcc-toolset-13: C++20 for Electron 42 natives; still links glibc 2.28.
           GCC_TOOLSET_ROOT="/opt/rh/gcc-toolset-13/root"
           echo "PATH=${GCC_TOOLSET_ROOT}/usr/bin:${PATH}" >> "${GITHUB_ENV}"
@@ -751,7 +757,9 @@ jobs:
           apt-get -o Acquire::Retries=4 install -y curl build-essential python3 git libfuse2 file rpm \
             libarchive-tools \
             libglib2.0-0 libgtk-3-0 libnss3 libxss1 libxtst6 libasound2 \
-            libatk-bridge2.0-0 libdrm2 libgbm1 libx11-xcb1 libxcb-dri3-0
+            libatk-bridge2.0-0 libdrm2 libgbm1 libx11-xcb1 libxcb-dri3-0 \
+            openjdk-17-jdk-headless
+          # Fork: the JDK compiles the JDBC support jar the database module needs.
           curl -fsSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time 300 \
             https://deb.nodesource.com/setup_22.x | bash -
           apt-get -o Acquire::Retries=4 install -y nodejs

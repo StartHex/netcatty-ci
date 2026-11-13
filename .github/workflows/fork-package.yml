@@ -28,6 +28,8 @@ jobs:
             artifact_name: netcatty-linux-x64
 
     env:
+      # Fail instead of shipping a package without the JDBC support jar.
+      NETCATTY_REQUIRE_JDBC_SIDECAR: "1"
       GITHUB_TOKEN: ${{ github.token }}
       ELECTRON_BUILDER_PUBLISH: never
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
