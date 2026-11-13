@@ -51,6 +51,8 @@ export type { DbColumnInfo, DbTableRef } from '../../infrastructure/services/dat
 
 /** Rows fetched for a statement that carries no LIMIT of its own. */
 const FULL_RESULT_ROWS = 10000;
+export const DEFAULT_QUERY_TIMEOUT_SEC = 30;
+export const MAX_QUERY_TIMEOUT_SEC = 2 * 60 * 60;
 
 export type DatabaseTabStatus = 'idle' | 'connecting' | 'ready' | 'error';
 
@@ -74,6 +76,8 @@ export interface DatabaseTab {
   tablesError?: string;
   /** Row cap for the next run (100..5000). */
   maxRows: number;
+  /** How long a statement may run before it is cancelled, in seconds. Default 30. */
+  timeoutSec?: number;
   /** Column metadata shown by the schema panel's structure view. */
   structure?: { table: DbTableRef; columns: DbColumnInfo[]; loading?: boolean; error?: string };
   /** Set when the current result comes from one table with a usable primary key. */
@@ -128,6 +132,7 @@ export interface UseDatabaseWorkbenchResult {
   bindSqlFile: (tabId: string, filePath: string, savedSql: string) => void;
   runQuery: (tabId: string, sqlOverride?: string, options?: { maxRows?: number }) => Promise<void>;
   setMaxRows: (tabId: string, maxRows: number) => void;
+  setQueryTimeout: (tabId: string, seconds: number) => void;
   beginTransaction: (tabId: string) => Promise<void>;
   commitTransaction: (tabId: string) => Promise<void>;
   rollbackTransaction: (tabId: string) => Promise<void>;
@@ -557,6 +562,14 @@ export function useDatabaseWorkbench(
     [patchTab],
   );
 
+  const setQueryTimeout = useCallback(
+    (tabId: string, seconds: number) => {
+      const clamped = Math.min(MAX_QUERY_TIMEOUT_SEC, Math.max(1, Math.round(seconds)));
+      patchTab(tabId, { timeoutSec: clamped });
+    },
+    [patchTab],
+  );
+
   const setMaxRows = useCallback(
     (tabId: string, maxRows: number) => {
       const clamped = Math.min(5000, Math.max(1, Math.round(maxRows)));
@@ -804,6 +817,7 @@ export function useDatabaseWorkbench(
         // Statements without their own LIMIT load a full page set so the grid
         // can paginate client-side; tab.maxRows is the page size, not a cap.
         const maxRows = options?.maxRows ?? FULL_RESULT_ROWS;
+        const timeoutMs = (tabsRef.current.find((entry) => entry.id === tabId)?.timeoutSec ?? DEFAULT_QUERY_TIMEOUT_SEC) * 1000;
 
         if (statements.length === 1) {
           const statement = statements[0];
@@ -815,7 +829,7 @@ export function useDatabaseWorkbench(
               endLine: statement.startLine + (statement.sql.match(/\n/g)?.length ?? 0),
             },
           });
-          const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows });
+          const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows, timeoutMs });
           if (!isCurrentRun(tabId, token)) return;
           if (response.ok === true && response.result) {
             patchTab(tabId, {
@@ -869,7 +883,7 @@ export function useDatabaseWorkbench(
               endLine: statement.startLine + (statement.sql.match(/\n/g)?.length ?? 0),
             },
           });
-          const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows });
+          const response = await runDatabaseQuery(resolved.target, statement.sql, { maxRows, timeoutMs });
           if (!isCurrentRun(tabId, token)) return;
           transactionState = { ...transactionState, ...transactionPatch(response) };
           if (response.ok === true && response.result) {
@@ -1197,6 +1211,7 @@ export function useDatabaseWorkbench(
     bindSqlFile,
     runQuery,
     setMaxRows,
+    setQueryTimeout,
     refreshTables,
     previewTable,
     showStructure,

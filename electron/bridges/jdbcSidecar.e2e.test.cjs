@@ -197,7 +197,9 @@ describe("JDBC sidecar end to end", { skip }, () => {
       assert.deepEqual(response.rows, [["1", "row1"], ["2", "row2"]]);
       assert.equal(response.fields.rows, "2");
       assert.equal(response.fields.truncated, "true");
-      assert.deepEqual(log.since(from), ["setQueryTimeout(9)", "execute(SELECT 3)", "setFetchSize(3)"]);
+      // The batch size is asked for before the statement runs, and the rest of
+      // the result is cancelled once the cap is reached.
+      assert.deepEqual(log.since(from), ["setQueryTimeout(9)", "setFetchSize(3)", "execute(SELECT 3)", "cancel"]);
     });
 
     test("driver errors come back with message and SQLSTATE", async () => {
@@ -329,6 +331,7 @@ describe("JDBC sidecar end to end", { skip }, () => {
       assert.deepEqual(log.since(from), [
         "setAutoCommit(false)",
         "setQueryTimeout(5)",
+        "setFetchSize(500)",
         "execute(INSERT x)",
         "commit",
         "setAutoCommit(true)",

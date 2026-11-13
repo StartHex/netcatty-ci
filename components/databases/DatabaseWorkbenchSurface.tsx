@@ -1182,6 +1182,24 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             onChange={(value) => workbench.setMaxRows(tab.id, value)}
           />
         </label>
+        <label className="flex items-center gap-1">
+          <span>{t('databases.workbench.timeout')}</span>
+          <select
+            className="h-5 rounded border border-border/60 bg-transparent px-1 text-[11px] outline-none focus:bg-muted/40"
+            value={tab.timeoutSec ?? QUERY_TIMEOUT_PRESETS[0]}
+            aria-label={t('databases.workbench.timeout')}
+            data-db-query-timeout=""
+            onChange={(event) => workbench.setQueryTimeout(tab.id, Number(event.target.value))}
+          >
+            {QUERY_TIMEOUT_PRESETS.map((seconds) => (
+              <option key={seconds} value={seconds}>
+                {seconds < 60
+                  ? t('databases.workbench.timeout.seconds', { count: seconds })
+                  : t('databases.workbench.timeout.minutes', { count: seconds / 60 })}
+              </option>
+            ))}
+          </select>
+        </label>
         <span>
           {t('databases.workbench.rowCount', {
             count: String(tab.result?.rowCount ?? 0),
@@ -1567,6 +1585,8 @@ const ClearableInput: React.FC<{
 );
 
 const ROW_LIMIT_PRESETS = [100, 500, 1000, 2000, 5000];
+/** Seconds a statement may run. The first one is the default. */
+const QUERY_TIMEOUT_PRESETS = [30, 120, 600, 1800, 3600, 7200];
 
 /**
  * Editable row limit: the number is a text field (type any value), the chevron

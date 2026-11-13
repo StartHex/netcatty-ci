@@ -171,6 +171,7 @@ const HARD_MAX_ROWS = 5000;
  */
 const SCHEMA_TABLE_LIMIT = 100000;
 const DEFAULT_TIMEOUT_MS = 30000;
+const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 15000;
 /** Upper bound for a test / connect round-trip (connect + version query). */
 const CONNECT_ROUNDTRIP_TIMEOUT_MS = 45000;
@@ -279,7 +280,9 @@ function clampMaxRows(value) {
 function clampTimeout(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_TIMEOUT_MS;
-  return Math.min(Math.trunc(n), 10 * 60 * 1000);
+  // Counting or scanning a table with hundreds of millions of rows takes
+  // far longer than interactive queries; the tab chooses how long to wait.
+  return Math.min(Math.trunc(n), MAX_TIMEOUT_MS);
 }
 
 function toCellValue(value) {

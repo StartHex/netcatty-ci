@@ -196,8 +196,14 @@ public final class NetcattyJdbcSidecar {
     Connection connection = connection(params);
     String sql = params.getOrDefault("sql", "");
     int maxRows = parseInt(params.get("maxRows"), 1000);
-    try (Statement statement = connection.createStatement()) {
+    Statement statement = createStreamingStatement(connection);
+    try {
       applyQueryTimeout(statement, params);
+      // Ask for rows in batches before executing. Set afterwards (as this
+      // used to do) most drivers ignore it and read the whole result into
+      // memory, which kills the JVM on a table with hundreds of millions of
+      // rows even though only the first page is wanted.
+      try { statement.setFetchSize(Math.min(maxRows + 1, 500)); } catch (Exception ignored) {}
       // Do not call setMaxRows: several drivers implement it by rewriting the
       // statement (trailing LIMIT), which breaks dialects that have no LIMIT.
       // The row cap is enforced while streaming instead.
@@ -210,7 +216,8 @@ public final class NetcattyJdbcSidecar {
         ok(id, tail);
         return;
       }
-      try (ResultSet resultSet = statement.getResultSet()) {
+      ResultSet resultSet = statement.getResultSet();
+      try {
         ResultSetMetaData meta = resultSet.getMetaData();
         int count = meta.getColumnCount();
         StringBuilder header = new StringBuilder("COLS\t").append(id);
@@ -223,10 +230,10 @@ public final class NetcattyJdbcSidecar {
         while (resultSet.next()) {
           if (rows >= maxRows) {
             truncated = true;
+            // Stop the server sending the rest: closing a half-read result
+            // makes some drivers read every remaining row first.
+            try { statement.cancel(); } catch (Exception ignored) {}
             break;
-          }
-          if (rows == 0) {
-            try { statement.setFetchSize(Math.min(maxRows + 1, 500)); } catch (Exception ignored) {}
           }
           StringBuilder row = new StringBuilder("ROW\t").append(id);
           for (int i = 1; i <= count; i++) {
@@ -240,7 +247,22 @@ public final class NetcattyJdbcSidecar {
         tail.put("rows", String.valueOf(rows));
         tail.put("truncated", truncated ? "true" : "false");
         ok(id, tail);
+      } finally {
+        // The answer is already sent. A cancelled statement may complain when
+        // closed; that must not turn into a second, contradictory answer.
+        try { resultSet.close(); } catch (Exception ignored) {}
       }
+    } finally {
+      try { statement.close(); } catch (Exception ignored) {}
+    }
+  }
+
+  /** Forward-only and read-only is what lets drivers stream instead of buffering. */
+  private static Statement createStreamingStatement(Connection connection) throws SQLException {
+    try {
+      return connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+    } catch (SQLException | RuntimeException unsupported) {
+      return connection.createStatement();
     }
   }
 

@@ -29,7 +29,8 @@ test("clampMaxRows applies the default and hard ceiling", () => {
 test("clampTimeout keeps timeouts inside the allowed window", () => {
   assert.equal(clampTimeout(undefined), 30000);
   assert.equal(clampTimeout(1), 1);
-  assert.equal(clampTimeout(900000), 600000);
+  assert.equal(clampTimeout(900000), 900000);
+  assert.equal(clampTimeout(3 * 60 * 60 * 1000), 2 * 60 * 60 * 1000);
 });
 
 test("toCellValue normalizes driver values for the renderer", () => {
