@@ -522,6 +522,8 @@ export const zhTWTerminalMessages: Messages = {
   'settings.terminal.connection.keepaliveInterval.desc': '向伺服器傳送 SSH 保活資料包的頻率（秒）。設為 0 表示全域停用——單個主機可在自己的設定裡覆蓋此值。',
   'settings.terminal.connection.keepaliveCountMax': '最大無回應保活次數',
   'settings.terminal.connection.keepaliveCountMax.desc': '判定連線死亡前允許的無回應保活次數。值越大對短暫網路抖動和回應慢的 SSH 服務越寬容。',
+  'settings.terminal.connection.keepaliveAlways': '一直保活',
+  'settings.terminal.connection.keepaliveAlways.desc': '伺服器不回應保活封包時也不主動中斷連線，只有網路真正中斷才算斷線。部分堡壘機和網路設備不回應保活封包，不開啟會在「間隔 × 次數」後被本端中斷。',
   'settings.terminal.connection.x11Display': 'X11 顯示位址',
   'settings.terminal.connection.x11Display.desc': '可選的本機 X11 顯示位址。留空則使用系統預設值。',
   'settings.terminal.connection.x11Display.placeholder': '自動（:0 或 DISPLAY）',

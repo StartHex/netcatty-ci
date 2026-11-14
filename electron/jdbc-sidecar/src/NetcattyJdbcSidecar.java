@@ -404,13 +404,39 @@ public final class NetcattyJdbcSidecar {
   }
 
   private static void fail(String id, Throwable error) {
-    String message = error.getMessage() == null ? error.toString() : error.getMessage();
+    String message = describe(error);
     String state = "";
     if (error instanceof SQLException) {
       SQLException sql = (SQLException) error;
       if (sql.getSQLState() != null) state = sql.getSQLState();
     }
     out.println("ERR\t" + id + "\t" + encode(message) + "\t" + encode(state));
+  }
+
+  /**
+   * Drivers wrap the real reason ("Connection refused", "Unknown host", a
+   * missing class) in a generic outer error, so the causes are appended.
+   */
+  static String describe(Throwable error) {
+    StringBuilder text = new StringBuilder();
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    Throwable current = error;
+    for (int depth = 0; current != null && depth < 6; depth++) {
+      String part = current.getMessage() == null ? current.toString() : current.getMessage();
+      if (current instanceof ClassNotFoundException || current instanceof NoClassDefFoundError) {
+        part = "class not found: " + part + " (a jar the driver depends on is missing from the driver files)";
+      } else if (current instanceof java.net.UnknownHostException) {
+        part = "unknown host: " + part;
+      }
+      if (seen.add(part) && text.indexOf(part) < 0) {
+        if (text.length() > 0) text.append(" <- ");
+        text.append(part);
+      }
+      Throwable next = current.getCause();
+      if (next == current) break;
+      current = next;
+    }
+    return text.toString();
   }
 
   private static void emit(String kind, String id) {

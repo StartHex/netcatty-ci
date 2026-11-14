@@ -1055,7 +1055,8 @@ function SettingsTerminalTab(props: {
             type="number"
             min={1}
             max={100}
-            value={terminalSettings.keepaliveCountMax}
+            disabled={terminalSettings.keepaliveCountMax === 0}
+            value={terminalSettings.keepaliveCountMax === 0 ? "" : terminalSettings.keepaliveCountMax}
             onChange={(e) => {
               const val = parseInt(e.target.value) || 1;
               if (val >= 1 && val <= 100) {
@@ -1063,6 +1064,15 @@ function SettingsTerminalTab(props: {
               }
             }}
             className="w-24"
+          />
+        </SettingRow>
+        <SettingRow
+          label={t("settings.terminal.connection.keepaliveAlways")}
+          description={t("settings.terminal.connection.keepaliveAlways.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.keepaliveCountMax === 0}
+            onChange={(v) => updateTerminalSetting("keepaliveCountMax", v ? 0 : 10)}
           />
         </SettingRow>
         <SettingRow

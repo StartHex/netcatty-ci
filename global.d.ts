@@ -144,7 +144,12 @@ declare global {
     // SSH-level keepalive interval in seconds (0 = disabled)
     keepaliveInterval?: number;
     // Unanswered keepalives before ssh2 declares the connection dead
+    // (0 = never give up)
     keepaliveCountMax?: number;
+    // Anti-idle input: seconds of silence before `antiIdleText` is typed
+    // into the shell (0 / undefined = off).
+    antiIdleIntervalSec?: number;
+    antiIdleText?: string;
     // Maximum time to establish the TCP connection
     sshTcpConnectTimeoutMs?: number;
     // Maximum time for SSH handshake and authentication

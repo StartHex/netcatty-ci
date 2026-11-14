@@ -160,7 +160,7 @@ export interface TerminalSettings {
    */
   temporaryConnectionsNetworkDeviceMode: boolean;
   keepaliveInterval: number; // Seconds between SSH-level keepalive packets (0 = disabled)
-  keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead
+  keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead; 0 = never give up
   sshAutoReconnectEnabled: boolean; // Automatically reconnect SSH sessions after unexpected disconnects
   x11Display: string; // Optional local X11 DISPLAY override (empty = use system DISPLAY/default)
 

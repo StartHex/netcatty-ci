@@ -577,7 +577,8 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   min={1}
                   max={100}
                   className="h-8 w-24 text-xs"
-                  value={form.keepaliveCountMax ?? 3}
+                  disabled={form.keepaliveCountMax === 0}
+                  value={form.keepaliveCountMax === 0 ? "" : (form.keepaliveCountMax ?? 3)}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10);
                     if (!Number.isFinite(v)) return;
@@ -586,11 +587,56 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   }}
                 />
               </HostDetailsSettingRow>
+              <ToggleRow
+                label={t("hostDetails.keepalive.always")}
+                hint={t("hostDetails.keepalive.always.desc")}
+                enabled={form.keepaliveCountMax === 0}
+                onToggle={() => update("keepaliveCountMax", form.keepaliveCountMax === 0 ? 3 : 0)}
+              />
               {(form.keepaliveInterval ?? 0) === 0 && (
                 <p className="text-xs text-muted-foreground break-words pl-1">
                   {t("hostDetails.keepalive.disabledHint")}
                 </p>
               )}
+            </div>
+          )}
+          <ToggleRow
+            label={t("hostDetails.antiIdle.enable")}
+            hint={t("hostDetails.antiIdle.desc")}
+            enabled={(form.antiIdleInterval ?? 0) > 0}
+            onToggle={() => update("antiIdleInterval", (form.antiIdleInterval ?? 0) > 0 ? 0 : 60)}
+          />
+          {(form.antiIdleInterval ?? 0) > 0 && (
+            <div className="space-y-2 pt-1">
+              <HostDetailsSettingRow label={t("hostDetails.antiIdle.interval")}>
+                <Input
+                  type="number"
+                  min={5}
+                  max={86400}
+                  className="h-8 w-24 text-xs"
+                  data-anti-idle-interval
+                  value={form.antiIdleInterval ?? 60}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!Number.isFinite(v)) return;
+                    if (v < 1 || v > 86400) return;
+                    update("antiIdleInterval", v);
+                  }}
+                />
+              </HostDetailsSettingRow>
+              <HostDetailsSettingRow label={t("hostDetails.antiIdle.text")}>
+                <Input
+                  className="h-8 w-24 text-xs font-mono"
+                  maxLength={64}
+                  placeholder={"\\n"}
+                  data-anti-idle-text
+                  value={form.antiIdleText ?? ""}
+                  onChange={(e) => update("antiIdleText", e.target.value || undefined)}
+                />
+              </HostDetailsSettingRow>
+              <p className="text-xs text-muted-foreground break-words pl-1">
+                {t("hostDetails.antiIdle.textHint")}
+              </p>
             </div>
           )}
         </HostDetailsSection>

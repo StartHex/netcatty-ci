@@ -8,14 +8,13 @@
  */
 
 import {
-  DATABASE_DEFAULT_PORTS,
   databaseEffectivePort,
   type DatabaseConnection,
   type DbConnectionTarget,
 } from '../../domain/models';
 import type { PortForwardingRule } from '../../domain/models/portForwarding';
 import type { Host, Identity, KnownHost, SSHKey, TerminalSettings } from '../../domain/models';
-import { parseJdbcEndpoint, rewriteJdbcUrlEndpoint } from '../../domain/database/jdbcUrl';
+import { jdbcDefaultPort, parseJdbcEndpoint, rewriteJdbcUrlEndpoint } from '../../domain/database/jdbcUrl';
 import { startPortForward, stopPortForward } from './portForwardingService';
 
 export interface DatabaseTunnelDeps {
@@ -74,28 +73,47 @@ function buildRule(
 export const hasDatabaseTunnel = (connectionId: string): boolean => tunnels.has(connectionId);
 
 /**
- * The host/port a connection dials. JDBC connections usually keep both inside
- * `jdbcUrl`, so fall back to parsing it before the kind defaults.
+ * The host/port a connection dials, or null when it cannot be told.
+ *
+ * A JDBC driver only ever reads its URL, so for JDBC connections the URL wins
+ * over the host/port fields: those are leftovers of the form that built the
+ * URL and go stale as soon as the URL is edited by hand.
  */
-function resolveRemoteEndpoint(connection: DatabaseConnection): { host: string; port: number } {
-  const jdbc = connection.kind === 'jdbc' && connection.jdbcUrl
-    ? parseJdbcEndpoint(connection.jdbcUrl)
-    : null;
-  const port = databaseEffectivePort(connection)
-    ?? jdbc?.port
-    ?? DATABASE_DEFAULT_PORTS[connection.kind];
-  return { host: connection.host || jdbc?.host || '127.0.0.1', port };
+export function resolveDatabaseRemoteEndpoint(
+  connection: DatabaseConnection,
+): { host: string; port: number } | null {
+  if (connection.kind === 'jdbc') {
+    const jdbc = connection.jdbcUrl ? parseJdbcEndpoint(connection.jdbcUrl) : null;
+    if (!jdbc) return null;
+    const port = jdbc.port
+      ?? jdbcDefaultPort(connection.jdbcUrl ?? '')
+      ?? databaseEffectivePort(connection);
+    return port ? { host: jdbc.host, port } : null;
+  }
+  const port = databaseEffectivePort(connection);
+  return port ? { host: connection.host || '127.0.0.1', port } : null;
 }
 
 export async function ensureDatabaseTunnel(
   connection: DatabaseConnection,
   deps: DatabaseTunnelDeps,
 ): Promise<{ ok: true; host: string; port: number } | { ok: false; error: string }> {
-  const remote = resolveRemoteEndpoint(connection);
-  const remotePort = remote.port;
+  const remote = resolveDatabaseRemoteEndpoint(connection);
   if (!connection.sshHostId) {
-    return { ok: true, host: remote.host, port: remotePort };
+    return { ok: true, host: remote?.host ?? connection.host ?? '127.0.0.1', port: remote?.port ?? 0 };
   }
+  if (!remote) {
+    // Connecting anyway would silently bypass the SSH host.
+    return {
+      ok: false,
+      error: connection.kind === 'jdbc'
+        ? 'Cannot tell which host and port this JDBC URL connects to, so it cannot go through the SSH host. '
+          + 'Write the address into the URL, for example jdbc:mysql://host:3306/db, '
+          + 'jdbc:oracle:thin:@//host:1521/SERVICE or jdbc:sqlserver://host:1433;databaseName=db.'
+        : 'This connection has no host and port to tunnel to',
+    };
+  }
+  const remotePort = remote.port;
   const existing = tunnels.get(connection.id);
   if (existing) {
     const sameEndpoint = existing.remoteHost === remote.host
@@ -152,7 +170,11 @@ async function openDatabaseTunnel(
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!started.success) {
-    return { ok: false, error: started.error || 'Failed to open the SSH tunnel' };
+    const via = jumpHost.label || jumpHost.hostname;
+    return {
+      ok: false,
+      error: `SSH tunnel to ${remote.host}:${remote.port} via ${via} failed: ${started.error || 'unknown error'}`,
+    };
   }
   const localPort = started.localPort;
   if (!localPort) {

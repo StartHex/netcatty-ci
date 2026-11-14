@@ -32,6 +32,7 @@ const {
   normalizeRemoteExitSignal,
 } = require("./remoteShellExit.cjs");
 const { looksLikeSkOpenSshMaterial } = require("../sshAuthHelper.cjs");
+const { resolveAntiIdlePolicy, startAntiIdle } = require("./antiIdle.cjs");
 
 const SSH_TCP_CONNECT_TIMEOUT_MS = 20000;
 const SSH_AUTH_READY_TIMEOUT_MS = 120000;
@@ -632,6 +633,7 @@ function createStartSessionApi(ctx) {
 
       stream.on("data", (data) => {
         if (sessions.get(sessionId) !== session) return;
+        session.lastActivityAt = Date.now();
         if (!shouldProcessSessionOutput(session, sshZmodemSentry)) {
           logTerminalOutputDropSample(session, {
             sessionId,
@@ -810,6 +812,18 @@ function createStartSessionApi(ctx) {
           stream.write(encodeTerminalInput(`${options.startupCommand}\n`, session.encoding));
         }, 300);
       }
+
+      // Opt-in per host: type into the shell when it has been idle, for
+      // servers that log idle users out regardless of SSH keepalives.
+      startAntiIdle({
+        session,
+        policy: resolveAntiIdlePolicy(options),
+        send: (text) => { stream.write(encodeTerminalInput(text, session.encoding)); },
+        isAlive: () => sessions.get(sessionId) === session
+          && !session.closed
+          && !stream.destroyed
+          && stream.writable !== false,
+      });
 
       return session;
     }

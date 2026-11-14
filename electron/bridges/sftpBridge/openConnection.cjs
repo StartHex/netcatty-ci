@@ -20,6 +20,8 @@ const SCP_PROBE_TIMEOUT_MS = 15_000;
  * AbortSignal that fires on parent abort or after timeoutMs.
  * Caller must dispose() to clear the timer.
  */
+const { toSsh2KeepaliveCountMax } = require("../sshConnectionPool.cjs");
+
 function createBoundedProbeSignal(parentSignal = null, timeoutMs = SCP_PROBE_TIMEOUT_MS) {
   const ac = new AbortController();
   let timedOut = false;
@@ -234,7 +236,7 @@ function createOpenConnectionApi(ctx) {
             : (hopInterval > 0 ? hopInterval * 1000 : 0);
           const hopCountMaxEffective = hopInterval == null
             ? 3
-            : (hopInterval > 0 ? (hopCountMax ?? 3) : 0);
+            : (hopInterval > 0 ? toSsh2KeepaliveCountMax(hopCountMax) : 0);
           const hopConnectionTimeouts = resolveSshConnectionTimeouts(jump);
           // Build connection options
           const connOpts = {

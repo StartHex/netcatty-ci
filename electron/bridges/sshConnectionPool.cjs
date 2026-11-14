@@ -506,6 +506,19 @@ function fingerprintAuth(endpoint) {
   });
 }
 
+/**
+ * ssh2 closes the connection once this many keepalives went unanswered. The
+ * settings use 0 for "never give up"; ssh2 has no such value, so it gets a
+ * count that cannot be reached.
+ */
+const KEEPALIVE_COUNT_UNLIMITED = 2147483647;
+
+function toSsh2KeepaliveCountMax(count, fallback = 3) {
+  const value = Number(count ?? fallback);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return value === 0 ? KEEPALIVE_COUNT_UNLIMITED : value;
+}
+
 function resolveConnectionKeepalivePolicy(options = {}) {
   const configuredInterval = options.keepaliveInterval;
   const intervalSeconds = configuredInterval == null
@@ -517,11 +530,10 @@ function resolveConnectionKeepalivePolicy(options = {}) {
   const configuredCount = configuredInterval == null
     ? 3
     : options.keepaliveCountMax;
-  const count = Number(configuredCount ?? 3);
   return {
     keepaliveIntervalMs,
-    keepaliveCountMax: keepaliveIntervalMs > 0 && Number.isFinite(count) && count >= 0
-      ? count
+    keepaliveCountMax: keepaliveIntervalMs > 0
+      ? toSsh2KeepaliveCountMax(configuredCount)
       : 0,
   };
 }
@@ -1568,6 +1580,8 @@ module.exports = {
   buildChannelAdoptionKey,
   buildConnectionReuseEndpoint,
   resolveConnectionKeepalivePolicy,
+  toSsh2KeepaliveCountMax,
+  KEEPALIVE_COUNT_UNLIMITED,
   normalizeEndpoint,
   sameEndpoint,
   endpointAllowsReuse,

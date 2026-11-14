@@ -522,6 +522,8 @@ export const zhCNTerminalMessages: Messages = {
   'settings.terminal.connection.keepaliveInterval.desc': '向服务器发送 SSH 保活数据包的频率（秒）。设为 0 表示全局禁用——单个主机可在自己的设置里覆盖此值。',
   'settings.terminal.connection.keepaliveCountMax': '最大无响应保活次数',
   'settings.terminal.connection.keepaliveCountMax.desc': '判定连接死亡前允许的无响应保活次数。值越大对短暂网络抖动和响应慢的 SSH 服务越宽容。',
+  'settings.terminal.connection.keepaliveAlways': '一直保活',
+  'settings.terminal.connection.keepaliveAlways.desc': '服务器不回应保活包时也不主动断开连接，只有网络真正中断才算掉线。部分堡垒机和网络设备不回应保活包，不开这个会在「间隔 × 次数」后被本端断开。',
   'settings.terminal.connection.x11Display': 'X11 显示地址',
   'settings.terminal.connection.x11Display.desc': '可选的本机 X11 显示地址。留空则使用系统默认值。',
   'settings.terminal.connection.x11Display.placeholder': '自动（:0 或 DISPLAY）',

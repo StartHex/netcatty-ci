@@ -485,6 +485,7 @@ const {
   failTransportDial,
   buildConnectionReuseEndpoint,
   resolveConnectionKeepalivePolicy,
+  toSsh2KeepaliveCountMax,
   normalizeEndpoint,
   discardAllTransports,
 } = require("./sshConnectionPool.cjs");
@@ -574,7 +575,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
         // below starts explicitly from the connection event instead.
         readyTimeout: 0,
         keepaliveInterval: hopInterval > 0 ? hopInterval * 1000 : 0,
-        keepaliveCountMax: hopInterval > 0 ? hopCountMax : 0,
+        keepaliveCountMax: hopInterval > 0 ? toSsh2KeepaliveCountMax(hopCountMax, 10) : 0,
         // Enable keyboard-interactive authentication (required for 2FA/MFA)
         tryKeyboard: true,
         // Per-hop algorithm settings. Two distinct semantics:

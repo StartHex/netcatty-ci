@@ -919,6 +919,8 @@ Resalta el panel dividido enfocado:
   'settings.terminal.connection.keepaliveInterval.desc': 'Con qué frecuencia (en segundos) enviar paquetes keepalive a nivel de SSH. Pon 0 para desactivarlo globalmente; ten en cuenta que los hosts individuales pueden anular esto en su propia configuración.',
   'settings.terminal.connection.keepaliveCountMax': 'Máximo de keepalives sin respuesta',
   'settings.terminal.connection.keepaliveCountMax.desc': 'Keepalives sin respuesta antes de declarar la conexión caída. Los valores más altos son más tolerantes con los cortes breves de red y los servidores SSH que responden lento.',
+  'settings.terminal.connection.keepaliveAlways': 'No rendirse nunca con el keepalive',
+  'settings.terminal.connection.keepaliveAlways.desc': 'No cerrar la conexión cuando el servidor deja los keepalives sin respuesta; solo un fallo real de red la termina. Algunos bastiones y equipos de red nunca responden y, de otro modo, se desconectarían tras intervalo × intentos.',
   'settings.terminal.connection.x11Display': 'Pantalla X11',
   'settings.terminal.connection.x11Display.desc': 'Dirección de pantalla local opcional para el reenvío X11. Déjala vacía para usar el valor predeterminado del sistema.',
   'settings.terminal.connection.x11Display.placeholder': 'Auto (:0 o DISPLAY)',

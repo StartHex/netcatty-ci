@@ -846,6 +846,8 @@ export const ruCoreMessages: Messages = {
   'settings.terminal.connection.keepaliveInterval.desc': 'Как часто (в секундах) отправлять keepalive-пакеты на уровне SSH. Установите 0, чтобы отключить глобально. Учтите, что отдельные хосты могут переопределять это значение в своих настройках.',
   'settings.terminal.connection.keepaliveCountMax': 'Макс. число пропущенных keepalive',
   'settings.terminal.connection.keepaliveCountMax.desc': 'Количество пропущенных keepalive, после которого соединение считается мёртвым. Более высокие значения лучше переносят краткие сетевые сбои и медленные ответы SSH-серверов.',
+  'settings.terminal.connection.keepaliveAlways': 'Никогда не разрывать по keepalive',
+  'settings.terminal.connection.keepaliveAlways.desc': 'Не закрывать соединение, если сервер не отвечает на keepalive; его завершает только реальный сбой сети. Некоторые бастионы и сетевые устройства не отвечают никогда и иначе были бы отключены через интервал × число попыток.',
   'settings.terminal.connection.x11Display': 'Дисплей X11',
   'settings.terminal.connection.x11Display.desc': 'Необязательный адрес локального дисплея для перенаправления X11. Оставьте пустым, чтобы использовать системное значение по умолчанию.',
   'settings.terminal.connection.x11Display.placeholder': 'Авто (:0 или DISPLAY)',

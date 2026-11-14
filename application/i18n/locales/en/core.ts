@@ -919,6 +919,8 @@ Highlight the focused split pane:
   'settings.terminal.connection.keepaliveInterval.desc': 'How often (in seconds) to send SSH-level keepalive packets. Set to 0 to disable globally — note that individual hosts can override this in their own settings.',
   'settings.terminal.connection.keepaliveCountMax': 'Max unanswered keepalives',
   'settings.terminal.connection.keepaliveCountMax.desc': 'Unanswered keepalives before the connection is declared dead. Higher values are more forgiving of brief network glitches and SSH servers that respond slowly.',
+  'settings.terminal.connection.keepaliveAlways': 'Never give up on keepalive',
+  'settings.terminal.connection.keepaliveAlways.desc': 'Do not close the connection when the server leaves keepalives unanswered; only a real network failure ends it. Some bastions and network devices never answer, and would otherwise be dropped after interval × count.',
   'settings.terminal.connection.x11Display': 'X11 display',
   'settings.terminal.connection.x11Display.desc': 'Optional local display address for X11 forwarding. Leave empty to use the system default.',
   'settings.terminal.connection.x11Display.placeholder': 'Auto (:0 or DISPLAY)',

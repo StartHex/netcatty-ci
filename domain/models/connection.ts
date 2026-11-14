@@ -344,8 +344,14 @@ export interface Host {
   // specific router / embedded device whose SSH stack doesn't reply to
   // OpenSSH keepalive global requests (issue #581 / #939).
   keepaliveInterval?: number; // Seconds; 0 = disabled
-  keepaliveCountMax?: number; // Unanswered keepalives before declaring dead
+  keepaliveCountMax?: number; // Unanswered keepalives before declaring dead; 0 = never give up
   keepaliveOverride?: boolean;
+  // Anti-idle input: when > 0, `antiIdleText` is typed into the shell after
+  // this many seconds without input or output. For servers that log idle
+  // users out (bash TMOUT, bastion idle policies) no matter what SSH
+  // keepalives say. Escapes such as \n and \x00 are decoded in the bridge.
+  antiIdleInterval?: number;
+  antiIdleText?: string;
   // Per-host SSH connection timeouts. Missing values retain Netcatty defaults.
   sshTcpConnectTimeoutSeconds?: number;
   sshAuthReadyTimeoutSeconds?: number;

@@ -737,6 +737,10 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           jumpHosts: jumpHosts.length > 0 ? jumpHosts : undefined,
           keepaliveInterval: keepalive.interval,
           keepaliveCountMax: keepalive.countMax,
+          antiIdleIntervalSec: ctx.host.antiIdleInterval && ctx.host.antiIdleInterval > 0
+            ? ctx.host.antiIdleInterval
+            : undefined,
+          antiIdleText: ctx.host.antiIdleText,
           sshTcpConnectTimeoutMs: connectionTimeouts.tcpConnectTimeoutSeconds * 1000,
           sshAuthReadyTimeoutMs: connectionTimeouts.authReadyTimeoutSeconds * 1000,
           verifyHostKeys: globalTerminalSettings.verifyHostKeys,

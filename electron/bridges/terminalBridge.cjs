@@ -1748,6 +1748,8 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
   if (data !== "\x03" && !payload.automated && !isTerminalReportSequence(data)) {
     disarmTerminalInterruptOutputGate(session);
   }
+  // Read by the anti-idle watcher (sshBridge/antiIdle.cjs).
+  session.lastActivityAt = Date.now();
 
   try {
     if (
