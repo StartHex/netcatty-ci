@@ -49,11 +49,13 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
   showAlgorithmOverrides,
   setShowAlgorithmOverrides,
   chainedHosts,
+  hostChainInherited = false,
   setActiveSubPanel,
   clearHostChain,
   proxySummaryType,
   proxySummaryLabel,
   proxySummaryTooltip,
+  proxyInherited = false,
   clearProxyConfig,
 }) => {
   const inheritedDeviceType = effectiveGroupDefaults?.deviceType;
@@ -503,6 +505,19 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
             enabled={!!form.showLineTimestamps}
             onToggle={() => update("showLineTimestamps", !form.showLineTimestamps)}
           />
+          {(form.protocol === undefined || form.protocol === "ssh") && !form.moshEnabled && !form.etEnabled && (
+            <>
+              <ToggleRow
+                label={t("hostDetails.sshInputCompatibility")}
+                hint={t("hostDetails.sshInputCompatibility.desc")}
+                enabled={form.sshInputCompatibility ?? true}
+                onToggle={() => update("sshInputCompatibility", !(form.sshInputCompatibility ?? true))}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("hostDetails.sshInputCompatibility.reconnect")}
+              </p>
+            </>
+          )}
           <HostDetailsSettingRow label={t("hostDetails.backspaceBehavior")}>
             <Select
               value={form.backspaceBehavior ?? "default"}
@@ -562,7 +577,8 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   min={1}
                   max={100}
                   className="h-8 w-24 text-xs"
-                  value={form.keepaliveCountMax ?? 3}
+                  disabled={form.keepaliveCountMax === 0}
+                  value={form.keepaliveCountMax === 0 ? "" : (form.keepaliveCountMax ?? 3)}
                   onChange={(e) => {
                     const v = parseInt(e.target.value, 10);
                     if (!Number.isFinite(v)) return;
@@ -571,11 +587,56 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   }}
                 />
               </HostDetailsSettingRow>
+              <ToggleRow
+                label={t("hostDetails.keepalive.always")}
+                hint={t("hostDetails.keepalive.always.desc")}
+                enabled={form.keepaliveCountMax === 0}
+                onToggle={() => update("keepaliveCountMax", form.keepaliveCountMax === 0 ? 3 : 0)}
+              />
               {(form.keepaliveInterval ?? 0) === 0 && (
                 <p className="text-xs text-muted-foreground break-words pl-1">
                   {t("hostDetails.keepalive.disabledHint")}
                 </p>
               )}
+            </div>
+          )}
+          <ToggleRow
+            label={t("hostDetails.antiIdle.enable")}
+            hint={t("hostDetails.antiIdle.desc")}
+            enabled={(form.antiIdleInterval ?? 0) > 0}
+            onToggle={() => update("antiIdleInterval", (form.antiIdleInterval ?? 0) > 0 ? 0 : 60)}
+          />
+          {(form.antiIdleInterval ?? 0) > 0 && (
+            <div className="space-y-2 pt-1">
+              <HostDetailsSettingRow label={t("hostDetails.antiIdle.interval")}>
+                <Input
+                  type="number"
+                  min={5}
+                  max={86400}
+                  className="h-8 w-24 text-xs"
+                  data-anti-idle-interval
+                  value={form.antiIdleInterval ?? 60}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!Number.isFinite(v)) return;
+                    if (v < 1 || v > 86400) return;
+                    update("antiIdleInterval", v);
+                  }}
+                />
+              </HostDetailsSettingRow>
+              <HostDetailsSettingRow label={t("hostDetails.antiIdle.text")}>
+                <Input
+                  className="h-8 w-24 text-xs font-mono"
+                  maxLength={64}
+                  placeholder={"\\n"}
+                  data-anti-idle-text
+                  value={form.antiIdleText ?? ""}
+                  onChange={(e) => update("antiIdleText", e.target.value || undefined)}
+                />
+              </HostDetailsSettingRow>
+              <p className="text-xs text-muted-foreground break-words pl-1">
+                {t("hostDetails.antiIdle.textHint")}
+              </p>
             </div>
           )}
         </HostDetailsSection>
@@ -628,9 +689,16 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
           title={t("hostDetails.jumpHosts")}
           action={
             chainedHosts.length > 0 ? (
-              <Badge variant="secondary" className="text-xs">
-                {t("hostDetails.jumpHosts.hops", { count: chainedHosts.length })}
-              </Badge>
+              <div className="flex items-center gap-1">
+                {hostChainInherited && (
+                  <Badge variant="outline" className="text-xs text-muted-foreground">
+                    {t("vault.groups.details.inherited")}
+                  </Badge>
+                )}
+                <Badge variant="secondary" className="text-xs">
+                  {t("hostDetails.jumpHosts.hops", { count: chainedHosts.length })}
+                </Badge>
+              </div>
             ) : (
               <Badge variant="outline" className="text-xs text-muted-foreground">
                 {t("hostDetails.jumpHosts.direct")}
@@ -651,8 +719,10 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   />
                   <span className="text-xs text-muted-foreground">
                     {t("hostDetails.jumpHosts.hops", { count: chainedHosts.length })}
+                    {hostChainInherited ? ` · ${t("vault.groups.details.inherited")}` : ""}
                   </span>
                 </div>
+                {!hostChainInherited && (
                 <X
                   size={14}
                   className="text-muted-foreground hover:text-destructive flex-shrink-0"
@@ -661,6 +731,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                     clearHostChain();
                   }}
                 />
+                )}
               </div>
               <div className="w-full space-y-1 pl-5">
                 {chainedHosts.slice(0, 5).map((h, idx) => (
@@ -722,7 +793,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                 <X size={14} />
               </Button>
             </div>
-          ) : form.proxyConfig?.host || form.proxyConfig?.command || form.proxyProfileId ? (
+          ) : form.proxyConfig?.host || form.proxyConfig?.command || form.proxyProfileId || proxyInherited ? (
             <div className="w-full min-w-0 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
               <button
                 type="button"
@@ -737,6 +808,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                     <TooltipTrigger asChild>
                       <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm">
                         {proxySummaryLabel}
+                        {proxyInherited ? ` · ${t("vault.groups.details.inherited")}` : ""}
                       </span>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" align="start" className="max-w-xs break-all">
@@ -745,6 +817,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                   </Tooltip>
                 </TooltipProvider>
               </button>
+              {!proxyInherited && (
               <Button
                 type="button"
                 variant="ghost"
@@ -755,6 +828,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
               >
                 <X size={14} />
               </Button>
+              )}
             </div>
           ) : (
             <Button

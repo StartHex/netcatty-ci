@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Copy, Minus, Plus } from 'lucide-react';
 
 import { jsonNodeSummary, safeParseJson } from '../../domain/http/responseBody';
@@ -8,6 +8,8 @@ export interface JsonTreeLabels {
   expand?: string;
   collapse?: string;
   copyValue?: string;
+  /** Label for the "render more children" row of a paged branch. */
+  showMore?: (remaining: number) => string;
 }
 
 interface JsonTreeViewerProps {
@@ -38,6 +40,13 @@ const INDENT_PX = 14;
 const MAX_LEAF_CHARS = 400;
 /** Above this node count the tree falls back to a shallow initial view. */
 const AUTO_EXPAND_NODE_LIMIT = 1500;
+/** Above this node count only the root stays open on first paint. */
+const SHALLOW_EXPAND_NODE_LIMIT = 20000;
+/**
+ * Children rendered per branch before a "show more" row. A 50k item array used
+ * to mount every row at once and freeze the window.
+ */
+export const JSON_TREE_CHILD_PAGE_SIZE = 200;
 
 const isBranch = (value: unknown): value is Record<string, unknown> | unknown[] =>
   value !== null && typeof value === 'object';
@@ -70,12 +79,17 @@ const copyPayload = (value: unknown): string => (typeof value === 'string' ? val
 const JsonRow: React.FC<JsonRowProps> = ({ label, value, depth, path, collapsedPaths, onToggle, labels, onCopyValue }) => {
   const branch = isBranch(value);
   const collapsed = branch && collapsedPaths.has(path);
+  const [visibleCount, setVisibleCount] = useState(JSON_TREE_CHILD_PAGE_SIZE);
+  // Only a user expand animates; the first paint of a big tree should not.
+  const [animateChildren, setAnimateChildren] = useState(false);
 
   const entries: Array<[string, unknown]> = useMemo(() => {
     if (!branch) return [];
     if (Array.isArray(value)) return value.map((item, index) => [String(index), item]);
     return Object.entries(value as Record<string, unknown>);
   }, [branch, value]);
+  const visibleEntries = entries.length > visibleCount ? entries.slice(0, visibleCount) : entries;
+  const hiddenCount = entries.length - visibleEntries.length;
 
   return (
     <div>
@@ -86,8 +100,11 @@ const JsonRow: React.FC<JsonRowProps> = ({ label, value, depth, path, collapsedP
         {branch ? (
           <button
             type="button"
-            onClick={() => onToggle(path)}
-            className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-border/70 text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              setAnimateChildren(collapsed);
+              onToggle(path);
+            }}
+            className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-border/70 text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
             aria-label={collapsed ? labels.expand ?? 'Expand' : labels.collapse ?? 'Collapse'}
           >
             {collapsed ? <Plus size={10} /> : <Minus size={10} />}
@@ -118,8 +135,9 @@ const JsonRow: React.FC<JsonRowProps> = ({ label, value, depth, path, collapsedP
           </button>
         ) : null}
       </div>
-      {branch && !collapsed
-        ? entries.map(([key, child]) => (
+      {branch && !collapsed ? (
+        <div className={animateChildren ? 'nc-anim-slide-down' : undefined}>
+          {visibleEntries.map(([key, child]) => (
             <JsonRow
               key={`${path}/${key}`}
               label={key}
@@ -131,8 +149,20 @@ const JsonRow: React.FC<JsonRowProps> = ({ label, value, depth, path, collapsedP
               labels={labels}
               onCopyValue={onCopyValue}
             />
-          ))
-        : null}
+          ))}
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              className="block rounded px-1 py-[1px] text-left text-[11px] text-primary/80 transition-colors hover:bg-muted/60 hover:text-primary"
+              style={{ marginLeft: (depth + 1) * INDENT_PX + 4 }}
+              data-testid="curl-json-show-more"
+              onClick={() => setVisibleCount((count) => count + JSON_TREE_CHILD_PAGE_SIZE * 5)}
+            >
+              {labels.showMore ? labels.showMore(hiddenCount) : `… ${hiddenCount} more`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -159,7 +189,11 @@ export const JsonTreeViewer: React.FC<JsonTreeViewerProps> = ({
     };
     // First pass counts nodes; the collapse depth depends on the payload size.
     walk(parsed, 0, '$', Number.POSITIVE_INFINITY);
-    const collapseFrom = expandByDefault && count <= AUTO_EXPAND_NODE_LIMIT ? Number.POSITIVE_INFINITY : 2;
+    const collapseFrom = expandByDefault && count <= AUTO_EXPAND_NODE_LIMIT
+      ? Number.POSITIVE_INFINITY
+      : count <= SHALLOW_EXPAND_NODE_LIMIT
+        ? 2
+        : 1;
     paths.clear();
     walk(parsed, 0, '$', collapseFrom);
     return paths;
@@ -172,6 +206,11 @@ export const JsonTreeViewer: React.FC<JsonTreeViewerProps> = ({
     paths: initialCollapsed,
   });
   const collapsedPaths = collapseState.seed === text ? collapseState.paths : initialCollapsed;
+  // Remount the rows for a new body so paging / animation state starts fresh.
+  const bodySeedRef = useRef({ text, key: 0 });
+  if (bodySeedRef.current.text !== text) {
+    bodySeedRef.current = { text, key: bodySeedRef.current.key + 1 };
+  }
 
   if (parsed === undefined) {
     return (
@@ -194,6 +233,7 @@ export const JsonTreeViewer: React.FC<JsonTreeViewerProps> = ({
   return (
     <div className={cn('p-2 font-mono text-xs', className)} data-testid="curl-json-tree">
       <JsonRow
+        key={bodySeedRef.current.key}
         label={null}
         value={parsed}
         depth={0}

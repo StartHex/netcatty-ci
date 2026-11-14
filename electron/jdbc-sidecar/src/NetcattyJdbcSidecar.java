@@ -95,14 +95,30 @@ public final class NetcattyJdbcSidecar {
       case "METACOLUMNS":
         metaColumns(id, params);
         return;
-      case "COMMIT":
-        connection(params).commit();
+      case "BEGIN":
+        // Statements run in auto-commit mode; a transaction is simply
+        // auto-commit switched off until COMMIT / ROLLBACK.
+        connection(params).setAutoCommit(false);
         ok(id, Map.of());
         return;
-      case "ROLLBACK":
-        connection(params).rollback();
+      case "COMMIT": {
+        Connection connection = connection(params);
+        if (!connection.getAutoCommit()) {
+          connection.commit();
+          connection.setAutoCommit(true);
+        }
         ok(id, Map.of());
         return;
+      }
+      case "ROLLBACK": {
+        Connection connection = connection(params);
+        if (!connection.getAutoCommit()) {
+          connection.rollback();
+          connection.setAutoCommit(true);
+        }
+        ok(id, Map.of());
+        return;
+      }
       case "DISCONNECT": {
         Connection connection = CONNECTIONS.remove(params.getOrDefault("connId", ""));
         if (connection != null) connection.close();
@@ -159,6 +175,9 @@ public final class NetcattyJdbcSidecar {
         properties.setProperty(key.substring(5), entry.getValue());
       }
     }
+    // Unreachable hosts otherwise block the (single threaded) sidecar for as
+    // long as the driver's own default, which can be minutes.
+    DriverManager.setLoginTimeout(Math.max(1, parseInt(params.get("loginTimeoutSec"), 20)));
     Connection connection = DriverManager.getConnection(url, properties);
     connection.setAutoCommit(true);
     Connection previous = CONNECTIONS.put(connId, connection);
@@ -177,7 +196,14 @@ public final class NetcattyJdbcSidecar {
     Connection connection = connection(params);
     String sql = params.getOrDefault("sql", "");
     int maxRows = parseInt(params.get("maxRows"), 1000);
-    try (Statement statement = connection.createStatement()) {
+    Statement statement = createStreamingStatement(connection);
+    try {
+      applyQueryTimeout(statement, params);
+      // Ask for rows in batches before executing. Set afterwards (as this
+      // used to do) most drivers ignore it and read the whole result into
+      // memory, which kills the JVM on a table with hundreds of millions of
+      // rows even though only the first page is wanted.
+      try { statement.setFetchSize(Math.min(maxRows + 1, 500)); } catch (Exception ignored) {}
       // Do not call setMaxRows: several drivers implement it by rewriting the
       // statement (trailing LIMIT), which breaks dialects that have no LIMIT.
       // The row cap is enforced while streaming instead.
@@ -190,7 +216,8 @@ public final class NetcattyJdbcSidecar {
         ok(id, tail);
         return;
       }
-      try (ResultSet resultSet = statement.getResultSet()) {
+      ResultSet resultSet = statement.getResultSet();
+      try {
         ResultSetMetaData meta = resultSet.getMetaData();
         int count = meta.getColumnCount();
         StringBuilder header = new StringBuilder("COLS\t").append(id);
@@ -203,10 +230,10 @@ public final class NetcattyJdbcSidecar {
         while (resultSet.next()) {
           if (rows >= maxRows) {
             truncated = true;
+            // Stop the server sending the rest: closing a half-read result
+            // makes some drivers read every remaining row first.
+            try { statement.cancel(); } catch (Exception ignored) {}
             break;
-          }
-          if (rows == 0) {
-            try { statement.setFetchSize(Math.min(maxRows + 1, 500)); } catch (Exception ignored) {}
           }
           StringBuilder row = new StringBuilder("ROW\t").append(id);
           for (int i = 1; i <= count; i++) {
@@ -220,9 +247,40 @@ public final class NetcattyJdbcSidecar {
         tail.put("rows", String.valueOf(rows));
         tail.put("truncated", truncated ? "true" : "false");
         ok(id, tail);
+      } finally {
+        // The answer is already sent. A cancelled statement may complain when
+        // closed; that must not turn into a second, contradictory answer.
+        try { resultSet.close(); } catch (Exception ignored) {}
       }
+    } finally {
+      try { statement.close(); } catch (Exception ignored) {}
     }
   }
+
+  /** Forward-only and read-only is what lets drivers stream instead of buffering. */
+  private static Statement createStreamingStatement(Connection connection) throws SQLException {
+    try {
+      return connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+    } catch (SQLException | RuntimeException unsupported) {
+      return connection.createStatement();
+    }
+  }
+
+  /**
+   * Driver-side statement timeout: the driver cancels the statement itself and
+   * the session survives, instead of Netcatty having to kill the JVM.
+   */
+  private static void applyQueryTimeout(Statement statement, Map<String, String> params) {
+    int seconds = parseInt(params.get("timeoutSec"), 0);
+    if (seconds <= 0) return;
+    try {
+      statement.setQueryTimeout(seconds);
+    } catch (Exception ignored) {
+      // Optional feature; the Node side still enforces its own deadline.
+    }
+  }
+
+  private static final int MAX_SCHEMA_TABLES = 100000;
 
   private static void metaTables(String id, Map<String, String> params) throws Exception {
     Connection connection = connection(params);
@@ -235,7 +293,9 @@ public final class NetcattyJdbcSidecar {
     try (ResultSet resultSet =
         connection.getMetaData().getTables(null, schema, "%", new String[] {"TABLE", "VIEW"})) {
       int rows = 0;
-      while (resultSet.next() && rows < 5000) {
+      // Not a result set: the schema panel needs every table, or its search
+      // cannot find the ones past the cut-off.
+      while (resultSet.next() && rows < MAX_SCHEMA_TABLES) {
         out.println("ROW\t" + id
             + "\t" + encode(resultSet.getString("TABLE_SCHEM") == null ? "" : resultSet.getString("TABLE_SCHEM"))
             + "\t" + encode(resultSet.getString("TABLE_NAME"))
@@ -291,6 +351,7 @@ public final class NetcattyJdbcSidecar {
   private static void update(String id, Map<String, String> params) throws Exception {
     Connection connection = connection(params);
     try (Statement statement = connection.createStatement()) {
+      applyQueryTimeout(statement, params);
       boolean hasResult = statement.execute(params.getOrDefault("sql", ""));
       Map<String, String> result = new HashMap<>();
       if (hasResult) {
@@ -343,13 +404,39 @@ public final class NetcattyJdbcSidecar {
   }
 
   private static void fail(String id, Throwable error) {
-    String message = error.getMessage() == null ? error.toString() : error.getMessage();
+    String message = describe(error);
     String state = "";
     if (error instanceof SQLException) {
       SQLException sql = (SQLException) error;
       if (sql.getSQLState() != null) state = sql.getSQLState();
     }
     out.println("ERR\t" + id + "\t" + encode(message) + "\t" + encode(state));
+  }
+
+  /**
+   * Drivers wrap the real reason ("Connection refused", "Unknown host", a
+   * missing class) in a generic outer error, so the causes are appended.
+   */
+  static String describe(Throwable error) {
+    StringBuilder text = new StringBuilder();
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    Throwable current = error;
+    for (int depth = 0; current != null && depth < 6; depth++) {
+      String part = current.getMessage() == null ? current.toString() : current.getMessage();
+      if (current instanceof ClassNotFoundException || current instanceof NoClassDefFoundError) {
+        part = "class not found: " + part + " (a jar the driver depends on is missing from the driver files)";
+      } else if (current instanceof java.net.UnknownHostException) {
+        part = "unknown host: " + part;
+      }
+      if (seen.add(part) && text.indexOf(part) < 0) {
+        if (text.length() > 0) text.append(" <- ");
+        text.append(part);
+      }
+      Throwable next = current.getCause();
+      if (next == current) break;
+      current = next;
+    }
+    return text.toString();
   }
 
   private static void emit(String kind, String id) {

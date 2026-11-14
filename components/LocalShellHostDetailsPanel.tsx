@@ -60,6 +60,7 @@ export const LocalShellHostDetailsPanel: React.FC<LocalShellHostDetailsPanelProp
   const [label, setLabel] = useState(initialData?.label ?? '');
   const [shell, setShell] = useState(initialData?.localShell ?? '');
   const [startDir, setStartDir] = useState(initialData?.localStartDir ?? '');
+  const [elevated, setElevated] = useState(initialData?.localElevated === true);
   // On creation, initialize from defaultGroup so the field reflects what a
   // plain save would persist; clearing it then intentionally saves at the
   // vault root. Edits keep the host's own group (possibly empty).
@@ -112,6 +113,8 @@ export const LocalShellHostDetailsPanel: React.FC<LocalShellHostDetailsPanelProp
     }));
   }, [groups, group]);
 
+  const isWindowsHost = (initialData?.os ?? detectLocalOs(navigator.userAgent || navigator.platform)) === 'windows';
+
   const buildHost = (): Host => {
     const host = createLocalShellHost({
       id: initialData?.id,
@@ -125,6 +128,7 @@ export const LocalShellHostDetailsPanel: React.FC<LocalShellHostDetailsPanelProp
       shellName: shellMeta?.name,
       shellIcon: shellMeta?.icon,
       startDir,
+      elevated,
       // Save the controlled value directly: '' means the user explicitly
       // cleared the group, which persists at the vault root.
       group: group,
@@ -226,6 +230,25 @@ export const LocalShellHostDetailsPanel: React.FC<LocalShellHostDetailsPanelProp
             )}
           </div>
         </div>
+
+        {/* Administrator / root */}
+        <label className="flex cursor-pointer items-start gap-3 rounded-md border border-border/60 p-3">
+          <input
+            type="checkbox"
+            checked={elevated}
+            onChange={(e) => setElevated(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
+            data-local-shell-elevated=""
+          />
+          <span className="min-w-0 space-y-1">
+            <span className="block text-sm font-medium">
+              {isWindowsHost ? t('localShell.field.elevated.windows') : t('localShell.field.elevated.posix')}
+            </span>
+            <span className="block text-xs text-muted-foreground">
+              {isWindowsHost ? t('localShell.field.elevated.windowsDesc') : t('localShell.field.elevated.posixDesc')}
+            </span>
+          </span>
+        </label>
       </AsidePanelContent>
 
       <AsidePanelFooter>

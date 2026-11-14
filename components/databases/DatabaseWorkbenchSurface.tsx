@@ -30,10 +30,11 @@ import {
   Eye,
   CheckCircle2,
   FileCode2,
+  Save,
   Wand2,
   X,
 } from 'lucide-react';
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { format as formatSqlText } from 'sql-formatter';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -67,6 +68,7 @@ import { statementAtLine } from '../../domain/database/sqlStatements';
 import {
   columnsToTsv,
   findResultMatches,
+  stepResultMatchCursor,
   sortResultRows,
   type ResultSort,
 } from '../../domain/database/resultGrid';
@@ -78,7 +80,7 @@ import {
   DATABASE_ENCODINGS,
   currentDatabaseEncoding,
 } from '../../domain/database/encoding';
-import { readSqlFile, saveDatabaseBinaryFile } from '@/infrastructure/services/databaseService.ts';
+import { readSqlFile, saveDatabaseBinaryFile, saveSqlFile } from '@/infrastructure/services/databaseService.ts';
 import { netcattyBridge } from '@/infrastructure/services/netcattyBridge.ts';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
@@ -116,17 +118,45 @@ function columnWidths(result: DbQueryResult | undefined): number[] {
 }
 
 function StatusDot({ tab }: { tab: DatabaseTab }) {
+  // Same element in every state, so the color cross-fades and the "ready"
+  // ping plays exactly when the class is added.
   if (tab.status === 'connecting') {
-    return <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />;
+    return <span className="nc-status-dot h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />;
   }
   if (tab.status === 'error' || !tab.connected) {
-    return <span className="h-1.5 w-1.5 rounded-full bg-destructive" />;
+    return <span className="nc-status-dot h-1.5 w-1.5 shrink-0 rounded-full bg-destructive" />;
   }
   if (tab.offline) {
-    return <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="offline" />;
+    return <span className="nc-status-dot nc-status-dot--warn h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" title="offline" />;
   }
-  return <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />;
+  return <span className="nc-status-dot nc-status-dot--ready h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />;
 }
+
+const formatElapsedSeconds = (ms: number): string =>
+  ms < 10_000 ? (ms / 1000).toFixed(1) : String(Math.round(ms / 1000));
+
+/**
+ * Live "running for 3.2 s" counter. Its own component so the 100 ms ticks
+ * re-render only this label, not the editor and the result grid.
+ */
+const RunElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => string }> = ({
+  startedAt,
+  format,
+}) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  if (!startedAt) return null;
+  return (
+    <span className="nc-anim-fade-in whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
+      {format(formatElapsedSeconds(Math.max(0, now - startedAt)))}
+    </span>
+  );
+};
 
 interface DatabaseWorkbenchSurfaceProps {
   /** Workbench tab id (without the `database:` prefix), or null when idle. */
@@ -287,9 +317,32 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       return;
     }
     workbench.updateSql(tab.id, loaded.text);
+    workbench.bindSqlFile(tab.id, filePath, loaded.text);
     sqlHistory.record(tab.connectionId, loaded.text);
     toast.success(t('databases.workbench.openSqlFileLoaded'));
   }, [tab, sqlHistory, t, workbench]);
+
+  // Save writes back to the bound file; the first save (and "save as") asks
+  // where to put it. The main process only overwrites files picked in a dialog.
+  const saveSqlToFile = useCallback(
+    async (saveAs = false) => {
+      const content = tab.sql;
+      const saved = await saveSqlFile({
+        content,
+        ...(tab.filePath && !saveAs ? { path: tab.filePath } : {}),
+        defaultName: tab.filePath ? sqlFileName(tab.filePath) : `${sanitizeSqlFileName(tab.title)}.sql`,
+      });
+      if (!saved.ok) {
+        toast.error(t('databases.workbench.saveSqlFileFailed', { error: (saved as { error?: string }).error ?? 'write-failed' }));
+        return;
+      }
+      if (saved.canceled || !saved.path) return;
+      workbench.bindSqlFile(tab.id, saved.path, content);
+      toast.success(t('databases.workbench.saveSqlFileSaved', { name: sqlFileName(saved.path) }));
+    },
+    [t, tab.filePath, tab.id, tab.sql, tab.title, workbench],
+  );
+  const sqlFileDirty = Boolean(tab.filePath) && tab.fileSavedSql !== tab.sql;
 
   const saveCurrentQuery = useCallback(() => {
     if (!onUpdateConnections) return;
@@ -348,14 +401,32 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     [autoWidths, savedWidths, tab.result],
   );
 
-  const sqlCompletionSource = useCallback(
+  // Built once per schema / structure / result change, not per keystroke: the
+  // editor asks for completions on every typed character, and sorting a few
+  // thousand table names each time made typing lag on large databases.
+  const structureColumns = tab.structure?.columns;
+  const resultColumns = tab.result?.columns;
+  const sqlCompletionEntries = useMemo(
     () =>
       buildSqlCompletionEntries({
         tables: tab.tables,
-        columns: tab.structure?.columns ?? [],
-        resultColumns: tab.result?.columns ?? [],
+        columns: structureColumns ?? [],
+        resultColumns: resultColumns ?? [],
       }),
-    [tab],
+    [tab.tables, structureColumns, resultColumns],
+  );
+  const sqlCompletionSource = useCallback(() => sqlCompletionEntries, [sqlCompletionEntries]);
+  // Stable callbacks so the memoized schema panel is not re-rendered by typing.
+  const tabId = tab.id;
+  const { refreshTables, previewTable, showStructure } = workbench;
+  const refreshSchema = useCallback(() => void refreshTables(tabId), [tabId, refreshTables]);
+  const previewSchemaTable = useCallback(
+    (table: DbTableRef) => void previewTable(tabId, table),
+    [tabId, previewTable],
+  );
+  const showSchemaStructure = useCallback(
+    (table: DbTableRef) => void showStructure(tabId, table),
+    [tabId, showStructure],
   );
 
   const pageSize = tab.maxRows || 1000;
@@ -377,11 +448,6 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     () => orderedRows.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize),
     [orderedRows, pageIndex, pageSize],
   );
-  const matches = useMemo(
-    () => findResultMatches(allRows, selectedColumns, searchQuery),
-    [allRows, selectedColumns, searchQuery],
-  );
-  const activeMatch = matches.length > 0 ? matches[Math.min(matchCursor, matches.length - 1)] : null;
   // Display position of each source row, so match jumps land on the right page
   // even while a sort reorders the grid.
   const positionBySource = useMemo(() => {
@@ -389,6 +455,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     orderedSourceIndexes.forEach((sourceIndex, position) => positions.set(sourceIndex, position));
     return positions;
   }, [orderedSourceIndexes]);
+  // Matches in the order they appear on screen, so previous / next walk the
+  // grid top to bottom whatever the sort is.
+  const matches = useMemo(() => {
+    const found = findResultMatches(allRows, selectedColumns, searchQuery);
+    const position = (rowIndex: number) => positionBySource.get(rowIndex) ?? rowIndex;
+    return found.sort(
+      (left, right) => position(left.rowIndex) - position(right.rowIndex) || left.columnIndex - right.columnIndex,
+    );
+  }, [allRows, positionBySource, selectedColumns, searchQuery]);
+  const matchPositions = useMemo(
+    () => matches.map((match) => positionBySource.get(match.rowIndex) ?? match.rowIndex),
+    [matches, positionBySource],
+  );
+  const activeMatch = matches.length > 0 ? matches[Math.min(matchCursor, matches.length - 1)] : null;
+  // Bumped by every previous / next click: revealing must happen even when the
+  // cursor value does not change (single match, or paging back to it).
+  const [revealToken, setRevealToken] = useState(0);
 
   useEffect(() => {
     setPage(0);
@@ -413,7 +496,7 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     setHighlight({ sourceIndex: activeMatch.rowIndex, columnIndex: activeMatch.columnIndex });
     const position = positionBySource.get(activeMatch.rowIndex) ?? activeMatch.rowIndex;
     setPage(Math.floor(position / pageSize));
-  }, [activeMatch, pageSize, positionBySource]);
+  }, [activeMatch, pageSize, positionBySource, revealToken]);
 
   const toggleSort = useCallback((columnIndex: number) => {
     setSort((current) => {
@@ -474,9 +557,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
   const goToMatch = useCallback(
     (delta: number) => {
       if (matches.length === 0) return;
-      setMatchCursor((current) => (current + delta + matches.length) % matches.length);
+      const direction = delta < 0 ? -1 : 1;
+      const current = Math.min(matchCursor, matches.length - 1);
+      const start = pageIndex * pageSize;
+      const activePosition = matchPositions[current] ?? -1;
+      // Paged away from the active match by hand: continue from this page.
+      const awayFromActive = activePosition < start || activePosition >= start + pageSize;
+      setMatchCursor(
+        stepResultMatchCursor(
+          matchPositions,
+          current,
+          direction,
+          awayFromActive ? { start, end: start + pageSize } : null,
+        ),
+      );
+      setRevealToken((token) => token + 1);
     },
-    [matches.length],
+    [matchCursor, matchPositions, matches.length, pageIndex, pageSize],
   );
 
   const [aiOpen, setAiOpen] = useState(false);
@@ -519,12 +616,12 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       <StatusDot tab={tab} />
       <span className="truncate font-medium">{tab.title}</span>
       {tab.transactionOpen ? (
-        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
-          {t('databases.workbench.beginTransaction')}
+        <span className="nc-anim-pop-in rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+          {t('databases.workbench.transactionActive')}
         </span>
       ) : null}
       {tab.executingStatement ? (
-        <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+        <span className="nc-anim-fade-in rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">
           {t('databases.workbench.statementProgress', {
             index: tab.executingStatement.index,
             total: tab.executingStatement.total,
@@ -574,13 +671,17 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
         <Button
           size="sm"
           variant="outline"
-          className="h-7 text-xs"
+          className="nc-anim-pop-in h-7 text-xs"
           onClick={() => workbench.cancelQuery(tab.id)}
         >
           <Square className="mr-1 h-3 w-3" />
           {t('databases.workbench.cancel')}
         </Button>
       ) : null}
+      <RunElapsed
+        startedAt={tab.running ? tab.runStartedAt : undefined}
+        format={(seconds) => t('databases.workbench.runningElapsed', { seconds })}
+      />
       <Popover>
         <PopoverTrigger asChild>
           <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
@@ -650,6 +751,42 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="relative h-7 w-7 p-0"
+            data-testid="db-save-sql-file"
+            aria-label={t('databases.workbench.saveSqlFile')}
+            onClick={(event) => void saveSqlToFile(event.shiftKey)}
+          >
+            <Save className="h-3.5 w-3.5" />
+            {sqlFileDirty ? (
+              <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+            ) : null}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{t('databases.workbench.saveSqlFile')}</TooltipContent>
+      </Tooltip>
+      {tab.filePath ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="flex h-7 max-w-[180px] items-center gap-1 rounded px-1.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => void saveSqlToFile(true)}
+            >
+              <span className="truncate font-mono">{sqlFileName(tab.filePath)}</span>
+              {sqlFileDirty ? <span className="shrink-0 text-amber-500" aria-label={t('databases.workbench.sqlFileUnsaved')}>●</span> : null}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <span className="block max-w-[420px] break-all font-mono text-[11px]">{tab.filePath}</span>
+            <span className="block text-[11px] opacity-80">{t('databases.workbench.saveSqlFileAs')}</span>
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      <Tooltip>
+        <TooltipTrigger asChild>
           <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={formatSql}>
             <Wand2 className="h-3.5 w-3.5" />
           </Button>
@@ -669,17 +806,18 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           <Button
             size="sm"
             variant="outline"
-            className="h-7 text-xs"
-            disabled={tab.running}
+            className="nc-anim-pop-in h-7 text-xs"
+            disabled={tab.running || tab.transactionBusy}
             onClick={() => void workbench.commitTransaction(tab.id)}
           >
+            {tab.transactionBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
             {t('databases.workbench.commit')}
           </Button>
           <Button
             size="sm"
             variant="ghost"
-            className="h-7 text-xs"
-            disabled={tab.running}
+            className="nc-anim-pop-in h-7 text-xs"
+            disabled={tab.running || tab.transactionBusy}
             onClick={() => void workbench.rollbackTransaction(tab.id)}
           >
             {t('databases.workbench.rollback')}
@@ -690,9 +828,10 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           size="sm"
           variant="ghost"
           className="h-7 text-xs"
-          disabled={tab.running || !tab.connected}
+          disabled={tab.running || !tab.connected || tab.transactionBusy}
           onClick={() => void workbench.beginTransaction(tab.id)}
         >
+          {tab.transactionBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
           {t('databases.workbench.beginTransaction')}
         </Button>
       )}
@@ -758,7 +897,8 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
         <Button
           size="sm"
           variant={tab.offline && tab.status !== 'error' ? 'default' : 'outline'}
-          className="h-7 text-xs"
+          className="nc-anim-pop-in h-7 text-xs"
+          disabled={tab.status === 'connecting'}
           onClick={() => void workbench.reconnect(tab.id)}
         >
           <RotateCw className="mr-1 h-3 w-3" />
@@ -772,11 +912,14 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
 
     <div className="flex min-h-0 min-w-0 flex-1">
       <SchemaPanel
-        tab={tab}
+        tabId={tab.id}
+        tables={tab.tables}
+        loading={Boolean(tab.tablesLoading)}
+        error={tab.tablesError}
         width={schemaWidth}
-        onRefresh={() => void workbench.refreshTables(tab.id)}
-        onPreview={(table) => void workbench.previewTable(tab.id, table)}
-        onShowStructure={(table) => void workbench.showStructure(tab.id, table)}
+        onRefresh={refreshSchema}
+        onPreview={previewSchemaTable}
+        onShowStructure={showSchemaStructure}
         t={t}
       />
       <div
@@ -790,6 +933,14 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     <div
       className="flex min-h-0 min-w-0 flex-col"
       style={{ flexBasis: `${editorRatio * 100}%`, flexGrow: 0, flexShrink: 0 }}
+      // Capture phase: the editor swallows key events it does not know.
+      onKeyDownCapture={(event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          void saveSqlToFile(event.shiftKey);
+        }
+      }}
     >
       <ScriptCodeEditor
         value={tab.sql}
@@ -827,8 +978,20 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
     />
 
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {tab.running ? (
+        <div
+          className="nc-progress-track shrink-0"
+          role="progressbar"
+          aria-busy="true"
+          aria-label={t('databases.workbench.running')}
+        />
+      ) : null}
       {tab.error ? (
-        <div className="shrink-0 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        <div
+          key={tab.error}
+          role="alert"
+          className="nc-anim-slide-down shrink-0 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+        >
           <div className="flex items-start gap-1.5">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <div className="min-w-0 space-y-0.5">
@@ -863,7 +1026,13 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
           t={t}
         />
       ) : tab.result && tab.result.columns.length > 0 ? (
-        <>
+        // Keyed per run (not per edit): a new result fades in, an in-place
+        // cell edit keeps the grid and its scroll position.
+        <div
+          key={`${tab.durationMs ?? ''}:${tab.activeResultIndex ?? 0}`}
+          className="nc-anim-fade-in nc-stale-content flex min-h-0 min-w-0 flex-1 flex-col"
+          data-stale={tab.running ? 'true' : undefined}
+        >
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
             <div className="flex min-w-0 items-center gap-1 rounded border border-border/60 px-1.5">
               <Search className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -980,14 +1149,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             onClearSelection={() => setSelectedColumns([])}
             rowNumberStart={pageIndex * pageSize}
           />
-        </>
+        </div>
       ) : (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <ArrowUpDown className="h-5 w-5 text-muted-foreground/60" />
+        <div
+          key={tab.status === 'connecting' ? 'connecting' : tab.running ? 'running' : 'empty'}
+          className="nc-anim-fade-in flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+        >
+          {tab.status === 'connecting' || tab.running ? (
+            <Loader2 className="h-5 w-5 animate-spin text-primary/80" />
+          ) : (
+            <ArrowUpDown className="h-5 w-5 text-muted-foreground/60" />
+          )}
           <p className="max-w-md text-xs text-muted-foreground">
             {tab.status === 'connecting'
               ? t('databases.workbench.connecting')
-              : t('databases.workbench.emptyHint')}
+              : tab.running
+                ? t('databases.workbench.running')
+                : t('databases.workbench.emptyHint')}
           </p>
         </div>
       )}
@@ -1003,6 +1181,24 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             label={t('databases.workbench.rowLimit')}
             onChange={(value) => workbench.setMaxRows(tab.id, value)}
           />
+        </label>
+        <label className="flex items-center gap-1">
+          <span>{t('databases.workbench.timeout')}</span>
+          <select
+            className="h-5 rounded border border-border/60 bg-transparent px-1 text-[11px] outline-none focus:bg-muted/40"
+            value={tab.timeoutSec ?? QUERY_TIMEOUT_PRESETS[0]}
+            aria-label={t('databases.workbench.timeout')}
+            data-db-query-timeout=""
+            onChange={(event) => workbench.setQueryTimeout(tab.id, Number(event.target.value))}
+          >
+            {QUERY_TIMEOUT_PRESETS.map((seconds) => (
+              <option key={seconds} value={seconds}>
+                {seconds < 60
+                  ? t('databases.workbench.timeout.seconds', { count: seconds })
+                  : t('databases.workbench.timeout.minutes', { count: seconds / 60 })}
+              </option>
+            ))}
+          </select>
         </label>
         <span>
           {t('databases.workbench.rowCount', {
@@ -1389,6 +1585,8 @@ const ClearableInput: React.FC<{
 );
 
 const ROW_LIMIT_PRESETS = [100, 500, 1000, 2000, 5000];
+/** Seconds a statement may run. The first one is the default. */
+const QUERY_TIMEOUT_PRESETS = [30, 120, 600, 1800, 3600, 7200];
 
 /**
  * Editable row limit: the number is a text field (type any value), the chevron
@@ -1466,7 +1664,10 @@ const RowLimitControl: React.FC<{
 };
 
 interface SchemaPanelProps {
-  tab: DatabaseTab;
+  tabId: string;
+  tables: DatabaseTab['tables'];
+  loading: boolean;
+  error?: string;
   width: number;
   onRefresh: () => void;
   onPreview: (table: DbTableRef) => void;
@@ -1474,27 +1675,62 @@ interface SchemaPanelProps {
   t: ReturnType<typeof useI18n>['t'];
 }
 
-const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPreview, onShowStructure, t }) => {
+const SCHEMA_ROW_HEIGHT = 22;
+
+type SchemaListItem =
+  | { kind: 'schema'; key: string; schema: string; count: number }
+  | { kind: 'table'; key: string; table: DbTableRef };
+
+/**
+ * The table list of a connection. Memoized on the table list itself (not on
+ * the tab, which changes with every keystroke in the editor) and virtualized:
+ * a database with thousands of tables used to mount a row, two icons and a
+ * tooltip for each of them and re-render them all while typing SQL.
+ */
+const SchemaPanel = memo(function SchemaPanel({
+  tabId,
+  tables,
+  loading,
+  error,
+  width,
+  onRefresh,
+  onPreview,
+  onShowStructure,
+  t,
+}: SchemaPanelProps) {
   const [tableQuery, setTableQuery] = useState('');
   useEffect(() => {
     setTableQuery('');
-  }, [tab.id]);
-  const visibleTables = useMemo(() => filterTables(tab.tables ?? [], tableQuery), [tab.tables, tableQuery]);
-  const grouped = useMemo(() => {
-    const map = new Map<string, DbTableRef[]>();
+  }, [tabId]);
+  // Typing in the filter stays instant; the list catches up right after.
+  const deferredQuery = useDeferredValue(tableQuery);
+  const visibleTables = useMemo(() => filterTables(tables ?? [], deferredQuery), [tables, deferredQuery]);
+  const items = useMemo(() => {
+    const bySchema = new Map<string, DbTableRef[]>();
     for (const table of visibleTables) {
-      const list = map.get(table.schema) ?? [];
-      list.push(table);
-      map.set(table.schema, list);
+      const list = bySchema.get(table.schema);
+      if (list) list.push(table);
+      else bySchema.set(table.schema, [table]);
     }
-    return [...map.entries()];
+    const flat: SchemaListItem[] = [];
+    for (const [schema, list] of bySchema) {
+      if (bySchema.size > 1) flat.push({ kind: 'schema', key: `schema:${schema}`, schema, count: list.length });
+      for (const table of list) flat.push({ kind: 'table', key: `${table.schema}.${table.name}`, table });
+    }
+    return flat;
   }, [visibleTables]);
+  const previewLabel = t('databases.schema.preview');
 
   return (
     <div className="flex shrink-0 flex-col border-r border-border/60" style={{ width }}>
       <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-2 py-1">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span className="flex min-w-0 items-baseline gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           {t('databases.schema.title')}
+          {tables && tables.length > 0 ? (
+            <span className="font-normal tabular-nums opacity-70">
+              {visibleTables.length === tables.length ? tables.length : `${visibleTables.length} / ${tables.length}`}
+            </span>
+          ) : null}
         </span>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1502,10 +1738,10 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
               size="sm"
               variant="ghost"
               className="h-5 w-5 p-0"
-              disabled={tab.tablesLoading}
+              disabled={loading}
               onClick={onRefresh}
             >
-              <RotateCw className={cn('h-3 w-3', tab.tablesLoading && 'animate-spin')} />
+              <RotateCw className={cn('h-3 w-3', loading && 'animate-spin')} />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{t('databases.schema.refresh')}</TooltipContent>
@@ -1520,65 +1756,76 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({ tab, width, onRefresh, onPrev
           onChange={setTableQuery}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-1">
-        {tab.tablesError ? (
-          <p className="px-1 py-2 text-[11px] text-destructive">{tab.tablesError}</p>
-        ) : grouped.length === 0 ? (
+      <div className="flex min-h-0 flex-1 flex-col p-1">
+        {error ? (
+          <p className="nc-anim-fade-in px-1 py-2 text-[11px] text-destructive">{error}</p>
+        ) : items.length === 0 && loading && !tableQuery.trim() ? (
+          <div className="space-y-1.5 px-1 py-1.5" aria-busy="true" aria-label={t('databases.schema.loading')}>
+            {[72, 56, 84, 64, 48, 76].map((barWidth, index) => (
+              <div key={index} className="flex items-center gap-1.5">
+                <span className="h-3 w-3 shrink-0 animate-pulse rounded-sm bg-muted" />
+                <span
+                  className="h-2.5 animate-pulse rounded-sm bg-muted"
+                  style={{ width: `${barWidth}%`, animationDelay: `${index * 90}ms` }}
+                />
+              </div>
+            ))}
+          </div>
+        ) : items.length === 0 ? (
           <p className="px-1 py-2 text-[11px] text-muted-foreground">
-            {tab.tablesLoading
+            {loading
               ? t('databases.schema.loading')
               : tableQuery.trim()
                 ? t('databases.schema.noMatches')
                 : t('databases.schema.empty')}
           </p>
         ) : (
-          grouped.map(([schema, tables]) => (
-            <div key={schema} className="mb-1">
-              {grouped.length > 1 ? (
-                <p className="px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
-                  {schema}
+          <FixedSizeVirtualList
+            items={items}
+            itemHeight={SCHEMA_ROW_HEIGHT}
+            overscan={12}
+            className="min-h-0 flex-1"
+            getItemKey={(item: SchemaListItem) => item.key}
+            renderItem={(item: SchemaListItem) =>
+              item.kind === 'schema' ? (
+                <p className="flex h-[22px] items-center gap-1.5 truncate px-1 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+                  <span className="truncate">{item.schema}</span>
+                  <span className="tabular-nums opacity-70">{item.count}</span>
                 </p>
-              ) : null}
-              {tables.map((table) => (
-                <div
-                  key={`${table.schema}.${table.name}`}
-                  className="group flex w-full items-center gap-1 rounded px-1 py-0.5 text-[11px] hover:bg-secondary"
-                >
+              ) : (
+                <div className="group flex h-[22px] w-full items-center gap-1 rounded px-1 text-[11px] hover:bg-secondary">
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 items-center gap-1 text-left"
-                    title={`${table.schema}.${table.name}`}
-                    onClick={() => onShowStructure(table)}
+                    title={`${item.table.schema}.${item.table.name}`}
+                    onClick={() => onShowStructure(item.table)}
                   >
-                    {table.type === 'view' ? (
+                    {item.table.type === 'view' ? (
                       <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
                     ) : (
                       <Table2 className="h-3 w-3 shrink-0 text-muted-foreground" />
                     )}
-                    <span className="truncate">{table.name}</span>
+                    <span className="truncate">{item.table.name}</span>
                   </button>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        className="rounded p-0.5 opacity-0 transition-opacity hover:bg-background group-hover:opacity-100"
-                        aria-label={t('databases.schema.preview')}
-                        onClick={() => onPreview(table)}
-                      >
-                        <Play className="h-3 w-3 text-muted-foreground" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t('databases.schema.preview')}</TooltipContent>
-                  </Tooltip>
+                  {/* Native title instead of a tooltip component per row. */}
+                  <button
+                    type="button"
+                    className="rounded p-0.5 opacity-0 hover:bg-background focus-visible:opacity-100 group-hover:opacity-100"
+                    aria-label={previewLabel}
+                    title={previewLabel}
+                    onClick={() => onPreview(item.table)}
+                  >
+                    <Play className="h-3 w-3 text-muted-foreground" />
+                  </button>
                 </div>
-              ))}
-            </div>
-          ))
+              )
+            }
+          />
         )}
       </div>
     </div>
   );
-};
+});
 
 interface StructurePanelProps {
   structure: NonNullable<DatabaseTab['structure']>;
@@ -1686,6 +1933,20 @@ interface ResultGridProps {
   rowNumberStart?: number;
 }
 
+/** Last path segment, for both / and \\ separators. */
+function sqlFileName(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() || filePath;
+}
+
+/** A tab title that is safe to offer as a file name on every platform. */
+function sanitizeSqlFileName(title: string): string {
+  const cleaned = Array.from(title, (char) => (char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char) ? '-' : char))
+    .join('')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[\s.-]+|[\s.-]+$/g, '');
+  return cleaned.slice(0, 80) || 'query';
+}
+
 const ACTION_COLUMN_WIDTH = 32;
 interface ResultRowProps {
   row: { cells: DbCellValue[]; sourceIndex: number };
@@ -1741,7 +2002,7 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
           )}
           style={{ gridTemplateColumns: template }}
         >
-          <div className="select-none px-2 text-right text-[11px] tabular-nums text-muted-foreground/60">
+          <div className="sticky left-0 z-[1] h-7 select-none border-r border-border/60 bg-background px-2 text-right text-[11px] leading-7 tabular-nums text-muted-foreground/60">
             {rowNumber}
           </div>
           {editable ? (
@@ -1792,15 +2053,18 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
               <div
                 key={cellIndex}
                 className={cn(
-                  'group/cell relative truncate px-3 font-mono',
-                  canPreview && 'pr-7',
+                  'relative truncate px-3 font-mono',
+                  // The preview affordance is a CSS pseudo-element (see
+                  // .nc-result-cell-preview): a real button + icon per cell
+                  // quadrupled the DOM and made every hover repaint slow.
+                  canPreview && 'nc-result-cell-preview pr-7',
                   value !== null && 'cursor-pointer hover:bg-secondary/40',
                   value === null && 'italic text-muted-foreground/70',
                   typeof value === 'number' && 'text-right tabular-nums',
                   selectedColumns.includes(cellIndex) && 'bg-primary/5',
                   isMatch && 'bg-amber-400/30 ring-1 ring-inset ring-amber-500/70',
                 )}
-                title={text}
+                title={canPreview ? `${text}\n\n${t('databases.workbench.previewCell')} ↗` : text}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   onOpenMenu({
@@ -1814,26 +2078,19 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
                   if (!editable || saving) return;
                   onBeginEdit(row.sourceIndex, cellIndex, cellText(value));
                 }}
-                onClick={() => {
+                onClick={(event) => {
+                  if (canPreview) {
+                    const box = event.currentTarget.getBoundingClientRect();
+                    if (box.right - event.clientX <= RESULT_CELL_PREVIEW_ZONE) {
+                      onPreview(cellIndex, text);
+                      return;
+                    }
+                  }
                   if (value === null) return;
                   onCopyCell(String(value));
                 }}
               >
                 {text}
-                {canPreview ? (
-                  <button
-                    type="button"
-                    aria-label={t('databases.workbench.previewCell')}
-                    title={t('databases.workbench.previewCell')}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 rounded bg-background/80 p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/cell:opacity-100"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onPreview(cellIndex, text);
-                    }}
-                  >
-                    <Eye className="h-3 w-3" />
-                  </button>
-                ) : null}
               </div>
             );
           })}
@@ -1843,8 +2100,17 @@ const ResultRow = memo(function ResultRow(props: ResultRowProps) {
 
 const ROW_NUMBER_WIDTH = 44;
 const ROW_NUMBER_ITEM_HEIGHT = 28;
-// The gutter mirrors the list viewport; render a generous window and clip it.
-const ROW_NUMBER_WINDOW = 60;
+// Scrolling runs on the compositor and can outrun a React render by a frame or
+// two; this many rows above and below the viewport keep that gap filled. Not
+// more: hovering repaints the whole grid layer, which scales with mounted rows.
+const RESULT_ROW_OVERSCAN = 10;
+// Width of the hover icon's click zone at the right edge of a cell.
+const RESULT_CELL_PREVIEW_ZONE = 24;
+// The header and the row numbers are sticky inside the scroller, so rows pass
+// underneath them: they need an opaque base under the translucent tint.
+const RESULT_HEADER_SURFACE: React.CSSProperties = {
+  backgroundImage: 'linear-gradient(hsl(var(--secondary) / 0.6), hsl(var(--secondary) / 0.6))',
+};
 
 const ResultGrid: React.FC<ResultGridProps> = ({
   columns,
@@ -1901,43 +2167,6 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   const handleCancelEdit = useCallback(() => {
     setEditing(null);
   }, []);
-  const gutterRef = useRef<HTMLDivElement | null>(null);
-  const gutterFrameRef = useRef<number | null>(null);
-  const gutterTopRef = useRef(0);
-  const gutterMetaRef = useRef({ start: 0, count: 0 });
-  const gutterFirstRef = useRef(Number.NaN);
-  gutterMetaRef.current = { start: rowNumberStart, count: rows.length };
-
-  // The gutter is refreshed imperatively: a React render per scroll frame would
-  // re-diff every visible cell and make wheel scrolling feel heavy.
-  const handleListScroll = useCallback((scrollTop: number) => {
-    gutterTopRef.current = scrollTop;
-    if (gutterFrameRef.current !== null) return;
-    gutterFrameRef.current = window.requestAnimationFrame(() => {
-      gutterFrameRef.current = null;
-      const host = gutterRef.current;
-      if (!host) return;
-      const top = gutterTopRef.current;
-      const { start, count } = gutterMetaRef.current;
-      const first = Math.floor(top / ROW_NUMBER_ITEM_HEIGHT);
-      // Fixed child offsets + one transform keeps this to a single style write
-      // per frame; the labels are only rewritten when a row crosses the edge.
-      host.style.transform = `translateY(${first * ROW_NUMBER_ITEM_HEIGHT - top}px)`;
-      if (first === gutterFirstRef.current) return;
-      gutterFirstRef.current = first;
-      for (let offset = 0; offset < ROW_NUMBER_WINDOW; offset += 1) {
-        const node = host.children[offset] as HTMLElement | undefined;
-        if (!node) continue;
-        const index = first + offset;
-        const label = index >= 0 && index < count ? String(start + index + 1) : '';
-        if (node.textContent !== label) node.textContent = label;
-      }
-    });
-  }, []);
-
-  useEffect(() => () => {
-    if (gutterFrameRef.current !== null) window.cancelAnimationFrame(gutterFrameRef.current);
-  }, []);
   const [menu, setMenu] = useState<
     { x: number; y: number; columnIndex: number | null; sourceIndex: number | null } | null
   >(null);
@@ -1985,6 +2214,11 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   const width = columnWidths.reduce((total, entry) => total + Math.round(entry), 0)
     + ROW_NUMBER_WIDTH
     + (editable ? ACTION_COLUMN_WIDTH : 0);
+
+  const contentSize: React.CSSProperties = {
+    minWidth: '100%',
+    width: width > 0 ? `${width}px` : undefined,
+  };
 
   const commitEdit = async () => {
     if (!editing || !onUpdateCell) {
@@ -2044,17 +2278,26 @@ const ResultGrid: React.FC<ResultGridProps> = ({
   return (
     <>
       <div className="relative flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden [&::-webkit-scrollbar]:h-2.5 [&::-webkit-scrollbar]:w-2.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-solid [&::-webkit-scrollbar-thumb]:border-background [&::-webkit-scrollbar-thumb]:bg-clip-padding [&::-webkit-scrollbar-track]:bg-transparent">
-        <div
-          className="flex min-h-0 flex-1 flex-col"
-          style={{ minWidth: '100%', width: width > 0 ? `${width}px` : undefined }}
-        >
+          <FixedSizeVirtualList
+            ref={listRef}
+            items={rows as { cells: DbCellValue[]; sourceIndex: number }[]}
+            itemHeight={ROW_NUMBER_ITEM_HEIGHT}
+            headerHeight={ROW_NUMBER_ITEM_HEIGHT}
+            overscan={RESULT_ROW_OVERSCAN}
+            // One scroller for both axes: the header (sticky top) and the row
+            // numbers (sticky left) are pinned by the compositor, so nothing
+            // has to be mirrored from scroll events.
+            className="min-h-0 flex-1 overflow-auto [&::-webkit-scrollbar]:h-2.5 [&::-webkit-scrollbar]:w-2.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-solid [&::-webkit-scrollbar-thumb]:border-background [&::-webkit-scrollbar-thumb]:bg-clip-padding [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-corner]:bg-transparent"
+            contentStyle={contentSize}
+            getItemKey={(_row, index) => String(index)}
+            header={
           <div
-            className="sticky top-0 z-10 grid h-7 shrink-0 border-b border-border/60 bg-secondary/60"
-            style={{ gridTemplateColumns: template }}
+            className="sticky top-0 z-10 grid h-7 shrink-0 border-b border-border/60 bg-background"
+            style={{ ...RESULT_HEADER_SURFACE, ...contentSize, gridTemplateColumns: template }}
           >
             <div
-              className="px-2 py-1.5 text-right text-[11px] font-semibold tabular-nums text-muted-foreground/60"
+              className="sticky left-0 z-[1] border-r border-border/60 bg-background px-2 py-1.5 text-right text-[11px] font-semibold tabular-nums text-muted-foreground/60"
+              style={RESULT_HEADER_SURFACE}
               title={t('databases.workbench.rowNumber')}
             >
               #
@@ -2160,13 +2403,7 @@ const ResultGrid: React.FC<ResultGridProps> = ({
               );
             })}
           </div>
-          <FixedSizeVirtualList
-            ref={listRef}
-            items={rows as { cells: DbCellValue[]; sourceIndex: number }[]}
-            itemHeight={ROW_NUMBER_ITEM_HEIGHT}
-            onScroll={handleListScroll}
-            className="min-h-0 flex-1"
-            getItemKey={(_row, index) => String(index)}
+            }
             renderItem={(row, rowIndex) => (
               <ResultRow
                 row={row}
@@ -2190,26 +2427,6 @@ const ResultGrid: React.FC<ResultGridProps> = ({
               />
             )}
           />
-        </div>
-        </div>
-        <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-11 border-r border-border/60 bg-background">
-          <div className="h-7 border-b border-border/60 bg-secondary/60" />
-          <div className="relative h-[calc(100%-1.75rem)] overflow-hidden">
-            <div ref={gutterRef} className="absolute inset-0">
-              {Array.from({ length: ROW_NUMBER_WINDOW }, (_unused, offset) => (
-                <div
-                  key={offset}
-                  className="absolute left-0 right-0 pr-2 text-right text-[11px] tabular-nums text-muted-foreground/60"
-                  style={{
-                    top: offset * ROW_NUMBER_ITEM_HEIGHT,
-                    height: ROW_NUMBER_ITEM_HEIGHT,
-                    lineHeight: `${ROW_NUMBER_ITEM_HEIGHT}px`,
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
       </div>
       <Dialog open={Boolean(preview)} onOpenChange={(open) => { if (!open) setPreview(null); }}>
         <DialogContent className="flex max-h-[80vh] w-[min(760px,calc(100vw-2rem))] flex-col overflow-hidden">

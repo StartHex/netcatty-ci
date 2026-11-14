@@ -86,6 +86,7 @@ function createTerminalSessionClone(
     localShellArgs: session.localShellArgs,
     localShellName: session.localShellName,
     localShellIcon: session.localShellIcon,
+    ...(session.localElevated ? { localElevated: true } : {}),
     localStartDir: isLocal && options.inheritedCwd ? options.inheritedCwd : session.localStartDir,
     fontSize: session.fontSize,
     fontSizeOverride: session.fontSizeOverride,

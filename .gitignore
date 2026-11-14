@@ -34,6 +34,7 @@
 !eslint.config.js
 !flake.lock
 !flake.nix
+!fork-version.json
 !global.d.ts
 !index.css
 !index.html
@@ -173,3 +174,6 @@ build_with_vs2022.bat
 
 # JDBC sidecar jar copied beside the bridge at packaging time
 electron/bridges/jdbc-sidecar/*.jar
+
+# Local plugin example staging and bundles
+/examples/plugins/*/.package/

@@ -102,6 +102,9 @@ permissions:
   pull-requests: read
 
 env:
+  # Fork: fail a build instead of shipping a package without the JDBC
+  # support jar (a build machine without a JDK used to skip it silently).
+  NETCATTY_REQUIRE_JDBC_SIDECAR: "1"
   # npm retries only transient registry fetches; deterministic install or
   # postinstall failures still fail immediately.
   NPM_CONFIG_FETCH_RETRIES: "4"
@@ -314,7 +317,12 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: a check build carries the upstream base and its commit
+            # (1.1.90-fork-sha-abc1234) instead of 0.0.0, so Settings shows
+            # what it is and the update check treats it as a fork build that
+            # is older than every published <base>-fork.<n> release.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
@@ -344,6 +352,9 @@ jobs:
           fi
           npm run ${{ matrix.pack_script }}
 
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
       - name: Test tray panel layout
         run: npm run test:tray-panel-layout
 
@@ -353,7 +364,59 @@ jobs:
           NETCATTY_TRAY_LAYOUT_SCALE: "2"
         run: npm run test:tray-panel-layout
 
+      # Fork: the Windows installer in this artifact gets the same setup window
+      # as the published fork builds, so a build downloaded from a pull
+      # request check does not open the stock NSIS wizard.
+      - name: Wrap the Windows installer in the setup window
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          node scripts/build-windows-setup-shell.cjs
+          shell_exe="$(find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' | head -n 1)"
+          test -n "$shell_exe"
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
+          mv -f "$shell_exe" "release/$(basename "$shell_exe")"
+
+      # Check builds: one artifact per package, so a single format can be
+      # downloaded without the others. Tagged releases keep the combined
+      # artifact the release job consumes.
+      - name: Upload Windows installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'windows' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-windows-x64-installer
+          path: |
+            release/*-win-x64.exe
+            !release/*-portable-*
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 dmg
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'macos' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-dmg
+          path: release/*-arm64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 dmg
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'macos' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-dmg
+          path: release/*-x64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-${{ matrix.name }}
@@ -443,7 +506,10 @@ jobs:
             dpkg fakeroot \
             fuse fuse-libs gtk3 nss libXScrnSaver libXtst alsa-lib \
             at-spi2-atk libdrm mesa-libgbm libX11 libX11-xcb libxcb \
-            mesa-libGL pango cairo
+            mesa-libGL pango cairo \
+            java-17-openjdk-devel
+          # Fork: the JDK compiles the JDBC support jar the database module
+          # needs; without it the package ships with JDBC connections broken.
           # gcc-toolset-13: C++20 for Electron 42 natives; still links glibc 2.28.
           GCC_TOOLSET_ROOT="/opt/rh/gcc-toolset-13/root"
           echo "PATH=${GCC_TOOLSET_ROOT}/usr/bin:${PATH}" >> "${GITHUB_ENV}"
@@ -605,7 +671,9 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: same check-build version as the matrix job.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
@@ -645,6 +713,9 @@ jobs:
           done
           npm run pack:linux-x64
 
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
       - name: Verify packaged node-pty Linux runtime
         run: bash scripts/ensure-node-pty-linux.sh verify x64
 
@@ -654,7 +725,52 @@ jobs:
       - name: Verify packaged rpm artifact
         run: bash scripts/verify-linux-rpm-artifact.sh x86_64
 
+      - name: Upload Linux deb
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-deb
+          path: release/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-rpm
+          path: release/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-appimage
+          path: release/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-pacman
+          path: release/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-linux-x64
@@ -725,7 +841,9 @@ jobs:
           apt-get -o Acquire::Retries=4 install -y curl build-essential python3 git libfuse2 file rpm \
             libarchive-tools \
             libglib2.0-0 libgtk-3-0 libnss3 libxss1 libxtst6 libasound2 \
-            libatk-bridge2.0-0 libdrm2 libgbm1 libx11-xcb1 libxcb-dri3-0
+            libatk-bridge2.0-0 libdrm2 libgbm1 libx11-xcb1 libxcb-dri3-0 \
+            openjdk-17-jdk-headless
+          # Fork: the JDK compiles the JDBC support jar the database module needs.
           curl -fsSL --retry 4 --retry-all-errors --connect-timeout 20 --max-time 300 \
             https://deb.nodesource.com/setup_22.x | bash -
           apt-get -o Acquire::Retries=4 install -y nodejs
@@ -755,7 +873,9 @@ jobs:
           if [[ "$GITHUB_REF" =~ $STRICT_VERSION_REF_RE ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.0.0-sha-${GITHUB_SHA:0:7}"
+            # Fork: same check-build version as the matrix job.
+            UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+            VERSION="${UPSTREAM_VERSION}-fork-sha-${GITHUB_SHA:0:7}"
           fi
           echo "Setting version to ${VERSION}"
           npm pkg set version="${VERSION}"
@@ -779,6 +899,9 @@ jobs:
           ELECTRON_BUILDER_PUBLISH: "never"
         run: npm run pack:linux-arm64
 
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
       - name: Verify packaged node-pty Linux runtime
         run: bash scripts/ensure-node-pty-linux.sh verify arm64
 
@@ -788,7 +911,52 @@ jobs:
       - name: Verify packaged rpm artifact
         run: bash scripts/verify-linux-rpm-artifact.sh aarch64
 
+      - name: Upload Linux deb
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-deb
+          path: release/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-rpm
+          path: release/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-appimage
+          path: release/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-pacman
+          path: release/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-linux-arm64

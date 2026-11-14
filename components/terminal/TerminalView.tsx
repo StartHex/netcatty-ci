@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { Terminal as XTerm } from '@xterm/xterm';
-import { ChevronsLeft, GripVertical, Minimize2, Network, PanelLeft, X as XIcon } from 'lucide-react';
+import { Bookmark, ChevronsLeft, GripVertical, Hash, Minimize2, Network, PanelLeft, X as XIcon } from 'lucide-react';
 import { isTerminalSensitiveInputActive } from './runtime/terminalSensitiveInputRegistry';
 import { isSessionReconnectDisabled } from '../top-tabs/SessionTabContextMenuContent';
 
@@ -21,6 +21,17 @@ import {
 } from './TerminalTimestampGutter';
 import { isTerminalAlternateScreenActive } from './terminalHibernateRuntime';
 import {
+  TerminalLineNumberGutter,
+  resolveTerminalLineNumberGutterWidth,
+} from './TerminalLineNumberGutter';
+import { TerminalLinePanel, type TerminalLinePanelNotice } from './TerminalLinePanel';
+import {
+  TERMINAL_LINE_ACTION_EVENT,
+  getTerminalLineTools,
+  type LineToolsTerminal,
+  type TerminalLineAction,
+} from './runtime/terminalLineTools';
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -35,6 +46,7 @@ type TerminalViewContext = Record<string, any>;
 type HostLineTimestampToggle = {
   id: string;
   showLineTimestamps?: boolean;
+  showLineNumbers?: boolean;
 };
 
 export function TerminalDisconnectedNotice({
@@ -494,7 +506,7 @@ function terminalViewCtxEqual(
 }
 
 function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalViewContext; isPaneMagnified?: boolean }) {
-  const { Activity, Button, Clock3, Copy, Maximize2, Radio, RefreshCcw, SquareArrowOutUpRight, TerminalAutocomplete, TerminalComposeBar, TerminalConnectionDialog, TerminalContextMenu, TerminalSearchBar, Tooltip, TooltipContent, TooltipTrigger, Unplug, ZmodemOverwriteDialog, ZmodemProgressIndicator, auth, autocompleteAcceptTextRef, autocompleteCloseRef, autocompleteHostOs, autocompleteInputRef, autocompleteKeyEventRef, autocompleteRepositionRef, autocompleteSettings, canUpdateHost, chainProgress, cn, compactToolbar, lineTimestampsAvailable, containerRef, effectiveFontSize, effectiveFontWeight, effectiveTerminalProtocol, effectiveTheme, error, executeSnippet, executeSnippetCommand, handleAddSelectionToAI, handleCancelConnect, handleCloseDisconnectedSession, handleCloseSearch, handleDisconnect, handleDismissDisconnectedDialog, handleDragEnter, handleDragLeave, handleDragOver, handleDrop, handleFindNext, handleFindPrevious, handleHostKeyAddAndContinue, handleHostKeyClose, handleHostKeyContinue, handleOsc52ReadResponse, handleOsc7SetupConfirm, handleOsc7SetupOpenChange, handleReceiveYmodem, handleRetry, handleSearch, handleSendYmodem, handleTopOverlayMouseDownCapture, hasMouseTracking, host, hotkeyScheme, inWorkspace, isBroadcastEnabled, composeSendToAll, onToggleComposeSendTarget, isCancelling, isComposeBarOpen, isConnectionAwaitingUserInput, isDraggingOver, isFocusMode, isFocusedPane, isLocalConnection, remoteDragDropUsesZmodem, isPluginTerminalProviderAvailable, isReconnectActive, isSerialConnection, isSearchOpen, isSupportedOs, isSystemSidebarEligible, isVisible, keyBindings, keys, identities, knownCwdRef, needsHostKeyVerification, onCloseSession, onDetach, onDetachPointerDown, onExpandToFocus, onTogglePaneMagnification, onOpenSystem, onRename, onSplitHorizontal, onSplitVertical, onToggleBroadcast, onUpdateHost, osc52ReadPromptVisible, osc7SetupOpen, osc7SetupRunning, passwordPromptActiveRef, pendingHostKeyInfo, progressLogs, progressValue, renderControls, resolvedFontFamily, restoreState, scriptExecutionOverlay, searchMatchCount, searchFocusToken, sessionDisplayName, sessionId, workspaceId, sessionRef, setIsComposeBarOpen, setShowLogs, shouldShowConnectionDialog, showDisconnectedTerminalNotice, showConnectionControls, showLogs, showSelectionAIAction, isRestoringSelectionRef, snippets, status, sudoHintRef, sudoHintText, passwordPickerState, onPasswordPickerSelect, passwordPickerTitle, passwordPickerEmptyText, t, termRef, terminalContextActions, terminalCwdTracker, terminalPreviewVars, terminalSettings, terminalReconnectAvailable, reconnectNoticeMessage, timeLeft, toast, zmodem } = ctx;
+  const { Activity, Button, Clock3, Copy, Maximize2, Radio, RefreshCcw, SquareArrowOutUpRight, TerminalAutocomplete, TerminalComposeBar, TerminalConnectionDialog, TerminalContextMenu, TerminalSearchBar, Tooltip, TooltipContent, TooltipTrigger, Unplug, ZmodemOverwriteDialog, ZmodemProgressIndicator, auth, autocompleteAcceptTextRef, autocompleteCloseRef, autocompleteHostOs, autocompleteInputRef, autocompleteKeyEventRef, autocompleteRepositionRef, autocompleteSettings, canUpdateHost, chainProgress, cn, compactToolbar, lineTimestampsAvailable, containerRef, effectiveFontSize, effectiveFontWeight, effectiveTerminalProtocol, effectiveTheme, error, executeSnippet, executeSnippetCommand, handleAddSelectionToAI, handleCancelConnect, handleCloseDisconnectedSession, handleCloseSearch, handleDisconnect, handleDismissDisconnectedDialog, handleDragEnter, handleDragLeave, handleDragOver, handleDrop, handleFindNext, handleFindPrevious, handleHostKeyAddAndContinue, handleHostKeyClose, handleHostKeyContinue, handleOsc52ReadResponse, handleOsc7SetupConfirm, handleOsc7SetupOpenChange, handleReceiveYmodem, handleRetry, handleSearch, handleSendYmodem, handleTopOverlayMouseDownCapture, hasMouseTracking, host, hotkeyScheme, inWorkspace, isBroadcastEnabled, composeSendToAll, onToggleComposeSendTarget, isCancelling, isComposeBarOpen, isConnectionAwaitingUserInput, isDraggingOver, isFocusMode, isFocusedPane, isLocalConnection, remoteDragDropUsesZmodem, isPluginTerminalProviderAvailable, isReconnectActive, isSerialConnection, isSearchOpen, isSupportedOs, isSystemSidebarEligible, isVisible, keyBindings, keys, identities, knownCwdRef, needsHostKeyVerification, onCloseSession, onDetach, onDetachPointerDown, onExpandToFocus, onTogglePaneMagnification, onOpenSystem, onRename, onSplitHorizontal, onSplitVertical, onToggleBroadcast, onUpdateHost, osc52ReadPromptVisible, osc7SetupOpen, osc7SetupRunning, passwordPromptActiveRef, pendingHostKeyInfo, progressLogs, progressValue, renderControls, resolvedFontFamily, restoreState, scriptExecutionOverlay, searchMatchCount, searchFocusToken, sessionDisplayName, sessionId, workspaceId, sessionRef, setIsComposeBarOpen, setShowLogs, shouldShowConnectionDialog, showDisconnectedTerminalNotice, showConnectionControls, showLogs, showSelectionAIAction, isRestoringSelectionRef, snippets, status, sudoHintRef, sudoHintText, passwordPickerState, onPasswordPickerSelect, passwordPickerTitle, passwordPickerEmptyText, t, termRef, terminalContextActions, terminalCwdTracker, terminalPreviewVars, terminalSettings, terminalReconnectAvailable, reconnectNoticeMessage, connectionDeadlineAt, connectionTimeoutSeconds, toast, zmodem } = ctx;
   // Context menu only needs a snapshot at open; avoid selection state lifting into Terminal.
   const [contextMenuHasSelection, setContextMenuHasSelection] = useState(false);
   const isNetworkDevice = host.deviceType === 'network'
@@ -624,6 +636,86 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
       onUpdateHost({ id: host.id, showLineTimestamps: next });
     });
   }, [host.id, onUpdateHost, showLineTimestampGutter]);
+  // Line numbers, line marks and the go-to / copy-range panel.
+  const [lineNumbersOverride, setLineNumbersOverride] = useState<boolean | null>(null);
+  const hostLineNumbersEnabled = host.showLineNumbers === true;
+  useEffect(() => {
+    if (lineNumbersOverride === null) return;
+    if (hostLineNumbersEnabled === lineNumbersOverride) setLineNumbersOverride(null);
+  }, [hostLineNumbersEnabled, lineNumbersOverride]);
+  const showLineNumberGutter = lineNumbersOverride ?? hostLineNumbersEnabled;
+  const [lineNumberGutterWidth, setLineNumberGutterWidth] = useState(() => (
+    resolveTerminalLineNumberGutterWidth({ lastLineNumber: 1, fontSize: effectiveFontSize })
+  ));
+  const handleLineNumberGutterWidthChange = useCallback((width: number) => {
+    setLineNumberGutterWidth((current) => (current === width ? current : width));
+  }, []);
+  const lineNumberGutterEnabled = showLineNumberGutter && !alternateScreenActive;
+  const activeLineNumberGutterWidth = lineNumberGutterEnabled ? lineNumberGutterWidth : 0;
+  const lineNumberToggleLabel = showLineNumberGutter
+    ? t("terminal.lines.numbersDisable")
+    : t("terminal.lines.numbersEnable");
+  const showLineNumberGutterRef = useRef(showLineNumberGutter);
+  showLineNumberGutterRef.current = showLineNumberGutter;
+  const handleToggleLineNumbers = useCallback(() => {
+    const next = !showLineNumberGutterRef.current;
+    setLineNumbersOverride(next);
+    if (onUpdateHost) {
+      queueMicrotask(() => {
+        onUpdateHost({ id: host.id, showLineNumbers: next });
+      });
+    }
+  }, [host.id, onUpdateHost]);
+  const [linePanelOpen, setLinePanelOpen] = useState(false);
+  const [linePanelFocusToken, setLinePanelFocusToken] = useState(0);
+  const openLinePanel = useCallback(() => {
+    setLinePanelOpen(true);
+    setLinePanelFocusToken((token) => token + 1);
+  }, []);
+  const closeLinePanel = useCallback(() => setLinePanelOpen(false), []);
+  const handleLinePanelNotice = useCallback((notice: TerminalLinePanelNotice) => {
+    if (notice.kind === 'success') toast.success(notice.message);
+    else if (notice.kind === 'error') toast.error(notice.message);
+    else toast.info(notice.message);
+  }, [toast]);
+  const handleTerminalLineAction = useCallback((action: TerminalLineAction) => {
+    const term = termRef.current;
+    if (!term) return;
+    if (action === 'toggleTerminalLineNumbers') {
+      handleToggleLineNumbers();
+      return;
+    }
+    if (action === 'goToTerminalLine') {
+      openLinePanel();
+      return;
+    }
+    const tools = getTerminalLineTools(term as unknown as LineToolsTerminal);
+    if (tools.isAlternateScreen()) return;
+    if (action === 'toggleTerminalLineMark') {
+      const bufferLine = tools.getDefaultMarkLine();
+      const added = tools.toggleMark(bufferLine);
+      toast.info(t(added ? 'terminal.lines.marks.added' : 'terminal.lines.marks.removed', {
+        line: tools.toLineNumber(bufferLine),
+      }));
+      return;
+    }
+    const step = tools.stepMark(action === 'nextTerminalLineMark' ? 1 : -1);
+    if (step) {
+      toast.info(t('terminal.lines.marks.position', { index: step.index + 1, total: step.total, line: step.lineNumber }));
+    } else {
+      toast.info(t('terminal.lines.marks.none'));
+    }
+  }, [handleToggleLineNumbers, openLinePanel, t, termRef, toast]);
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onLineAction = (event: Event) => {
+      const action = (event as CustomEvent<{ action?: TerminalLineAction }>).detail?.action;
+      if (action) handleTerminalLineAction(action);
+    };
+    container.addEventListener(TERMINAL_LINE_ACTION_EVENT, onLineAction);
+    return () => container.removeEventListener(TERMINAL_LINE_ACTION_EVENT, onLineAction);
+  }, [containerRef, handleTerminalLineAction, sessionId]);
   const titleConnectionAddress = formatTerminalTitleConnectionAddress(host);
   // Prefer vault host.label over sessionDisplayName so dynamic tab titles
   // (cwd / coding-cli) do not replace the stable server name in this bar.
@@ -874,6 +966,46 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
                       <TooltipContent side="bottom">{lineTimestampToggleLabel}</TooltipContent>
                     </Tooltip>
                   )}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "ml-0.5 p-0.5 rounded transition-colors flex-shrink-0",
+                          "hover:bg-[color:var(--terminal-toolbar-btn-hover)]",
+                          showLineNumberGutter ? "opacity-100" : "opacity-60 hover:opacity-100",
+                        )}
+                        style={showLineNumberGutter ? { backgroundColor: 'var(--terminal-toolbar-btn-active)' } : undefined}
+                        onClick={handleToggleLineNumbers}
+                        aria-label={lineNumberToggleLabel}
+                        aria-pressed={showLineNumberGutter}
+                        data-terminal-line-numbers-toggle=""
+                      >
+                        <Hash size={10} />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{lineNumberToggleLabel}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "ml-0.5 p-0.5 rounded transition-colors flex-shrink-0",
+                          "hover:bg-[color:var(--terminal-toolbar-btn-hover)]",
+                          linePanelOpen ? "opacity-100" : "opacity-60 hover:opacity-100",
+                        )}
+                        style={linePanelOpen ? { backgroundColor: 'var(--terminal-toolbar-btn-active)' } : undefined}
+                        onClick={() => (linePanelOpen ? closeLinePanel() : openLinePanel())}
+                        aria-label={t("terminal.lines.panel")}
+                        aria-pressed={linePanelOpen}
+                        data-terminal-line-panel-toggle=""
+                      >
+                        <Bookmark size={10} />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{t("terminal.lines.panel")}</TooltipContent>
+                  </Tooltip>
                   {isSystemSidebarEligible && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -1190,19 +1322,43 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
             data-font-smoothing={terminalSettings?.fontSmoothing !== false ? "true" : "false"}
             style={{
               top: terminalContentTop,
-              left: activeLineTimestampGutterWidth + terminalBodyInset,
+              left: activeLineTimestampGutterWidth + terminalBodyInset + activeLineNumberGutterWidth,
               right: terminalRightInset,
               bottom: terminalBottomInset,
               paddingLeft: 6,
               backgroundColor: 'var(--terminal-ui-bg)',
             }}
           />
+          <TerminalLineNumberGutter
+            termRef={termRef}
+            containerRef={containerRef}
+            enabled={lineNumberGutterEnabled}
+            top={terminalContentTop}
+            left={terminalBodyInset}
+            bottom={terminalBottomInset}
+            sessionId={sessionId}
+            fontFamily={resolvedFontFamily}
+            fontSize={effectiveFontSize}
+            fontWeight={effectiveFontWeight}
+            width={lineNumberGutterWidth}
+            onWidthChange={handleLineNumberGutterWidthChange}
+            markTitle={t("terminal.lines.gutterHint")}
+          />
+          <TerminalLinePanel
+            termRef={termRef}
+            isOpen={linePanelOpen}
+            focusToken={linePanelFocusToken}
+            top={`calc(${terminalContentTop} + 6px)`}
+            right={terminalRightInset + 10}
+            onClose={closeLinePanel}
+            onNotify={handleLinePanelNotice}
+          />
           <TerminalTimestampGutter
             termRef={termRef}
             containerRef={containerRef}
             enabled={lineTimestampGutterLayout.enabled}
             top={terminalContentTop}
-            left={terminalBodyInset}
+            left={terminalBodyInset + activeLineNumberGutterWidth}
             bottom={terminalBottomInset}
             sessionId={sessionId}
             color={lineTimestampColor}
@@ -1352,6 +1508,7 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
                 restoreState={restoreState}
                 error={error}
                 progressValue={progressValue}
+                progressAnimating={connectionDeadlineAt != null}
                 chainProgress={chainProgress}
                 needsAuth={auth.needsAuth}
                 showLogs={showLogs}
@@ -1391,7 +1548,8 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
                   isValid: auth.isValid,
                 }}
                 progressProps={{
-                  timeLeft,
+                  timeLeft: connectionTimeoutSeconds,
+                  deadlineAt: connectionDeadlineAt,
                   isAwaitingUserInput: Boolean(isConnectionAwaitingUserInput),
                   isCancelling,
                   progressLogs,
@@ -1430,6 +1588,7 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
         {/* Compose Bar (solo sessions only; workspace uses TerminalLayer's global bar) */}
         {isComposeBarOpen && !inWorkspace && (
           <TerminalComposeBar
+            contextChipsEnabled={terminalSettings?.contextChipsEnabled !== false}
             key={sessionId}
             sessionId={sessionId}
             onSend={async (text) => {
@@ -1443,6 +1602,7 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
                 let anyRecipientSensitive = false;
                 let broadcastRecipientIds: readonly string[] = [];
                 const sent = await executeSnippetCommand(text, false, {
+                  preferBracketedPaste: true,
                   // Explicit target: active-only stays local while toolbar
                   // broadcast (keystrokes) can remain on, and send-to-all
                   // still fans out when the toolbar switch is off.

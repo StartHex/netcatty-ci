@@ -17,17 +17,16 @@ jobs:
           - name: windows-x64
             os: windows-latest
             pack_script: pack:win-x64
-            artifact_name: netcatty-windows-x64
           - name: macos
             os: macos-latest
             pack_script: pack:mac
-            artifact_name: netcatty-macos
           - name: linux-x64
             os: ubuntu-22.04
             pack_script: pack:linux-x64
-            artifact_name: netcatty-linux-x64
 
     env:
+      # Fail instead of shipping a package without the JDBC support jar.
+      NETCATTY_REQUIRE_JDBC_SIDECAR: "1"
       GITHUB_TOKEN: ${{ github.token }}
       ELECTRON_BUILDER_PUBLISH: never
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -64,9 +63,20 @@ jobs:
       - name: Set package version
         shell: bash
         run: |
-          VERSION="0.0.0-fork-${GITHUB_SHA:0:7}"
-          echo "Setting version to ${VERSION}"
+          # <upstream version>-fork.<run number>: the upstream release this
+          # code is based on (fork-version.json, bumped when upstream is
+          # merged) plus a counter that grows with every packaging run, so a
+          # later build always sorts after an earlier one and merging a newer
+          # upstream moves the base forward.
+          UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+          if [[ ! "$UPSTREAM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::fork-version.json upstreamVersion must be x.y.z, got '${UPSTREAM_VERSION}'"
+            exit 1
+          fi
+          VERSION="${UPSTREAM_VERSION}-fork.${GITHUB_RUN_NUMBER}"
+          echo "Setting version to ${VERSION} (commit ${GITHUB_SHA:0:7})"
           npm pkg set version="${VERSION}"
+          echo "FORK_VERSION=${VERSION}" >> "$GITHUB_ENV"
 
       - name: Prepare node-pty Linux runtime
         if: matrix.name == 'linux-x64'
@@ -81,6 +91,33 @@ jobs:
       - name: Build package
         run: npm run ${{ matrix.pack_script }}
 
+      # Same smoke test upstream runs on its release builds: connects through
+      # the packaged app.asar with the Electron runtime, so a build whose SSH
+      # transport is broken (e.g. the ChaCha20 fallback missing from the
+      # package) fails here instead of on a user's machine.
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
+      # Wrap the NSIS installer in the dark glass setup window. The wrapped
+      # file takes the installer's name, so it is the one that gets uploaded;
+      # the NSIS package inside is unchanged and still does the installing.
+      - name: Build Windows setup shell
+        if: matrix.name == 'windows-x64'
+        run: node scripts/build-windows-setup-shell.cjs
+
+      - name: Test Windows setup shell
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        run: |
+          shell_exe="$(find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' | head -n 1)"
+          test -n "$shell_exe"
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --screens --dump
+          node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
+          # The ways people really install: default folder, over an existing
+          # copy, while the app is running, with a real click, and over a copy
+          # installed for all users.
+          node scripts/test-windows-setup-scenarios.cjs --shell "$shell_exe"
+
       - name: Verify node-pty Linux runtime
         if: matrix.name == 'linux-x64'
         run: bash scripts/ensure-node-pty-linux.sh verify x64
@@ -89,6 +126,15 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: bash scripts/verify-linux-deb-artifact.sh amd64
 
+      # The JVM cannot open a jar inside app.asar. If the unpacked copy is
+      # missing the app falls back to a copy cached in the user's profile.
+      - name: Verify the JDBC support jar is shipped unpacked
+        shell: bash
+        run: |
+          jar="$(find release -type f -name 'netcatty-jdbc-sidecar.jar' -path '*app.asar.unpacked*' | head -n 1)"
+          test -n "$jar" || { echo "netcatty-jdbc-sidecar.jar is not in app.asar.unpacked"; exit 1; }
+          ls -l "$jar"
+
       - name: Collect upload files
         shell: bash
         run: |
@@ -96,7 +142,7 @@ jobs:
           mkdir -p release-upload
           case "${{ matrix.name }}" in
             windows-x64)
-              find release -maxdepth 1 -type f -name '*-win-x64.exe' ! -name '*portable*' -exec cp -v '{}' release-upload/ ';'
+              find release/setup-shell -maxdepth 1 -type f -name '*-win-x64.exe' -exec cp -v '{}' release-upload/ ';'
               ;;
             macos)
               find release -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' \) -exec cp -v '{}' release-upload/ ';'
@@ -108,12 +154,105 @@ jobs:
           find release-upload -maxdepth 1 -type f -print
           test "$(find release-upload -maxdepth 1 -type f | wc -l)" -gt 0
 
-      - name: Upload artifacts
+      # One artifact per package, so a single format can be downloaded
+      # without the others.
+      - name: Upload Windows installer
+        if: matrix.name == 'windows-x64'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: release-upload/*
-          if-no-files-found: error
+          name: netcatty-windows-x64-installer
+          path: release-upload/*.exe
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 dmg
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-dmg
+          path: release-upload/*-arm64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 dmg
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-dmg
+          path: release-upload/*-x64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 zip
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-zip
+          path: release-upload/*-arm64.zip
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 zip
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-zip
+          path: release-upload/*-x64.zip
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux deb
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-deb
+          path: release-upload/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-rpm
+          path: release-upload/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-appimage
+          path: release-upload/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-pacman
+          path: release-upload/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
           retention-days: 7
 
       - name: Verify macOS bundle signature
@@ -151,6 +290,26 @@ jobs:
             gh release create "$tag" --title "$title" --notes "$notes" --prerelease
           fi
           gh release upload "$tag" release-upload/* --clobber
+          # Keep the download page short: only the three newest builds stay.
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
+
+      - name: Publish Linux x64 release assets
+        if: matrix.name == 'linux-x64'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="fork-linux-x64-latest"
+          title="Fork Linux x64 latest"
+          notes="Latest Linux x64 packages (AppImage, deb, rpm, pacman) produced by the fork packaging workflow.
+          Versions count upwards (1.1.90-fork.N), so installing a newer deb or rpm over an older one is an upgrade."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" release-upload/* --clobber
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
 
       - name: Publish macOS release assets
         if: matrix.name == 'macos'
@@ -167,5 +326,27 @@ jobs:
             gh release edit "$tag" --title "$title" --notes "$notes" --prerelease
           else
             gh release create "$tag" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" release-upload/* --clobber
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
+
+      # The in-app update check reads these releases (tag v<version>). Only
+      # builds of the default branch are published as versions; builds of any
+      # other branch stay test builds on the rolling fork-*-latest tags above
+      # and are never offered to users as an update.
+      - name: Publish versioned release (default branch only)
+        if: github.ref_name == github.event.repository.default_branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${FORK_VERSION}"
+          notes="Netcatty fork build ${FORK_VERSION} (commit ${GITHUB_SHA:0:7}).
+          macOS builds are ad-hoc signed: after installing run
+          xattr -dr com.apple.quarantine /Applications/Netcatty.app"
+          # The three platform jobs race to create the same release.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Netcatty ${FORK_VERSION}" --notes "$notes" --target "$GITHUB_SHA" \
+              || gh release view "$tag" >/dev/null
           fi
           gh release upload "$tag" release-upload/* --clobber

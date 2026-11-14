@@ -43,3 +43,16 @@ test('very large payloads still start shallow', () => {
   assert.match(markup, /1 key/);
   assert.doesNotMatch(markup, /value/);
 });
+
+test('large arrays render one page of children plus a show-more row', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(JsonTreeViewer, {
+      text: JSON.stringify(Array.from({ length: 450 }, (_, index) => index)),
+      labels: { showMore: (remaining: number) => `show ${remaining} more` },
+    }),
+  );
+  assert.match(markup, /curl-json-show-more/);
+  assert.match(markup, /show 250 more/);
+  assert.match(markup, />199</);
+  assert.doesNotMatch(markup, />200</);
+});

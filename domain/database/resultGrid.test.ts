@@ -6,6 +6,7 @@ import {
   columnsToTsv,
   compareResultCells,
   findResultMatches,
+  stepResultMatchCursor,
   sortResultRows,
 } from './resultGrid';
 
@@ -71,4 +72,25 @@ test('columnsToTsv copies the header plus the selected columns', () => {
   assert.equal(columnsToTsv(columns, rows.slice(0, 2), [0, 1]), 'name\tamount\nb\t2\na\t10');
   assert.equal(columnsToTsv(columns, rows.slice(0, 1), []), 'name\tamount\tnote\nb\t2\t');
   assert.equal(columnsToTsv(columns, rows, [0]).split('\n')[0], 'name');
+});
+
+test('stepResultMatchCursor steps and wraps while the active match is on screen', () => {
+  const positions = [3, 40, 250];
+  assert.equal(stepResultMatchCursor(positions, 0, 1), 1);
+  assert.equal(stepResultMatchCursor(positions, 2, 1), 0);
+  assert.equal(stepResultMatchCursor(positions, 0, -1), 2);
+  assert.equal(stepResultMatchCursor([], 0, 1), 0);
+});
+
+test('stepResultMatchCursor continues from the page the user paged to', () => {
+  // 100 rows per page: matches on pages 1, 1, 3 and 6.
+  const positions = [3, 40, 250, 590];
+  // Looking at page 2 (rows 100-199): next is the match on page 3, previous the last one on page 1.
+  assert.equal(stepResultMatchCursor(positions, 0, 1, { start: 100, end: 200 }), 2);
+  assert.equal(stepResultMatchCursor(positions, 3, -1, { start: 100, end: 200 }), 1);
+  // Past the last match: next wraps to the first, previous lands on the last.
+  assert.equal(stepResultMatchCursor(positions, 0, 1, { start: 600, end: 700 }), 0);
+  assert.equal(stepResultMatchCursor(positions, 0, -1, { start: 600, end: 700 }), 3);
+  // A single match elsewhere is still reachable (the cursor value does not change).
+  assert.equal(stepResultMatchCursor([590], 0, 1, { start: 0, end: 100 }), 0);
 });

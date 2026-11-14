@@ -5,6 +5,7 @@ import en from "../application/i18n/locales/en.ts";
 import zhCN from "../application/i18n/locales/zh-CN.ts";
 import zhTW from "../application/i18n/locales/zh-TW.ts";
 import { filterSettingsSearchCatalog } from "./settingsSearch.ts";
+import { resolveSettingsPlatform } from "./settingsSearchCatalog.ts";
 import { SETTINGS_SEARCH_CATALOG } from "./settingsSearchCatalog.ts";
 
 const EN: Record<string, string> = {
@@ -124,6 +125,48 @@ test("settings search finds App Lock from the zh-CN locale", () => {
   assert.ok(hits.some((hit) => hit.entry.id === "system-app-lock"));
 });
 
+test("settings search finds folder compression from the real locales", () => {
+  const tZhReal = (key: string) => zhCN[key] ?? key;
+  const tEnReal = (key: string) => en[key] ?? key;
+  for (const [t, queries] of [
+    [tZhReal, ["压缩", "普通传输"]],
+    [tEnReal, ["compress", "tar"]],
+  ] as const) {
+    for (const query of queries) {
+      const hits = filterSettingsSearchCatalog(query, t);
+      assert.ok(hits.some((hit) => hit.entry.id === "sftp-compressed-upload"), query);
+    }
+  }
+});
+
+test("settings search finds skip unchanged files from the real locales", () => {
+  const tZhReal = (key: string) => zhCN[key] ?? key;
+  const tEnReal = (key: string) => en[key] ?? key;
+  for (const [t, queries] of [
+    [tZhReal, ["跳过未改文件", "修改时间"]],
+    [tEnReal, ["skip unchanged", "rsync"]],
+  ] as const) {
+    for (const query of queries) {
+      const hits = filterSettingsSearchCatalog(query, t);
+      assert.ok(hits.some((hit) => hit.entry.id === "sftp-skip-unchanged"), query);
+    }
+  }
+});
+
+test("settings search finds SSH connection keep-alive from the real locales", () => {
+  const tZhReal = (key: string) => zhCN[key] ?? key;
+  const tEnReal = (key: string) => en[key] ?? key;
+  for (const [t, queries] of [
+    [tZhReal, ["保活时间", "重新认证"]],
+    [tEnReal, ["keep-alive", "re-authentication"]],
+  ] as const) {
+    for (const query of queries) {
+      const hits = filterSettingsSearchCatalog(query, t);
+      assert.ok(hits.some((hit) => hit.entry.id === "sftp-transport-idle-ttl"), query);
+    }
+  }
+});
+
 test("settings search finds temporary network device mode", () => {
   const tEnReal = (key: string) => en[key] ?? key;
   const tZhTW = (key: string) => zhTW[key] ?? key;
@@ -151,4 +194,38 @@ test("Sync status entries retain syncSubTab for navigation", () => {
   const backups = hits.find((hit) => hit.entry.id === "sync-local-backups");
   assert.ok(backups);
   assert.equal(backups?.entry.syncSubTab, "status");
+});
+
+test("macOS-only settings stay out of search on other platforms", () => {
+  const blurId = "appearance-window-background-blur";
+
+  // Both a targeted query and the default (empty query) list must skip it,
+  // otherwise selecting the hit jumps to a tab with no anchor to focus.
+  const macHits = filterSettingsSearchCatalog("", tEn, { platform: "mac", limit: 500 });
+  assert.ok(macHits.some((hit) => hit.entry.id === blurId));
+
+  for (const platform of ["win", "linux"] as const) {
+    const searched = filterSettingsSearchCatalog("frosted glass", tEn, { platform });
+    assert.equal(searched.some((hit) => hit.entry.id === blurId), false);
+
+    const defaults = filterSettingsSearchCatalog("", tEn, { platform, limit: 500 });
+    assert.equal(defaults.some((hit) => hit.entry.id === blurId), false);
+  }
+});
+
+test("platform-gated entries never hide cross-platform settings", () => {
+  for (const platform of ["mac", "win", "linux"] as const) {
+    const hits = filterSettingsSearchCatalog("opacity", tEn, { platform });
+    assert.ok(
+      hits.some((hit) => hit.entry.id === "appearance-window-opacity"),
+      `window opacity must stay searchable on ${platform}`,
+    );
+  }
+});
+
+test("resolveSettingsPlatform maps Electron-style platform strings", () => {
+  assert.equal(resolveSettingsPlatform("MacIntel"), "mac");
+  assert.equal(resolveSettingsPlatform("Win32"), "win");
+  assert.equal(resolveSettingsPlatform("Linux x86_64"), "linux");
+  assert.equal(resolveSettingsPlatform(""), "linux");
 });

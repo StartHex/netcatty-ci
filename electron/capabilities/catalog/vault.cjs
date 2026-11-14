@@ -48,7 +48,7 @@ const VAULT_CAPABILITIES = [
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
     description:
-      "Open a vault host by reusing its existing session when its connection settings still match (connected or connecting, including auto-reconnecting — same sessionId, no duplicate tab). Only opens a new terminal tab when no usable session for this host exists, or when newTab is true. Inactive disconnected and restored tabs are not reused. Returns the sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname.",
+      "Open a vault host by reusing its existing session when its connection settings still match (connected or connecting, including auto-reconnecting — same sessionId, no duplicate tab). Only opens a new terminal tab when no usable session for this host exists, or when newTab is true. A newly opened tab is placed in the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace; unbound chats get a standalone tab). Returns the sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname.",
     // Sidebar Catty is scoped to already-open terminals/workspaces and must not
     // expand that scope mid-turn. Keep host_open for MCP / CLI / global agent.
     agentKinds: [AGENT_KINDS.GLOBAL],
@@ -187,7 +187,7 @@ const VAULT_CAPABILITIES = [
     id: "vault.note.list",
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
-    description: "List notes in Vault → Notes (markdown notes visible in the vault sidebar).",
+    description: "List notes in Vault → Notes, newest first, without bodies. Notes live in two areas: \"daily\" (everyday jottings) and \"organized\" (cleaned-up notes). Filter by area, folder, updated/created time range, and organized=false for daily notes not yet written up. To organize a day's notes: list them (area=daily, organized=false, updatedAfter=<date>), read each with vault_notes_get, then create the write-up with vault_notes_create (area=organized, organizedFrom=<source ids>).",
     policy: {
       write: false,
       sensitiveRead: false,
@@ -227,7 +227,7 @@ const VAULT_CAPABILITIES = [
     id: "vault.note.create",
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
-    description: "Create a note in Vault → Notes sidebar (markdown documentation). NOT for adding SSH hosts — use vault_hosts_create for that.",
+    description: "Create a note in Vault → Notes sidebar (markdown documentation). area=organized puts it in the organized area; with organizedFrom the listed daily notes are marked as organized and linked to it in the same step (their text is kept). NOT for adding SSH hosts — use vault_hosts_create for that.",
     policy: {
       write: true,
       sensitiveRead: false,
@@ -293,6 +293,63 @@ const VAULT_CAPABILITIES = [
       cli: { command: ["notes", "import"] },
       global: { rpcMethod: "vault/notes/import" },
       public: { rpcMethod: "public/vault/notes/import", mcpTool: "vault_notes_import" },
+    },
+  },
+  {
+    id: "vault.note.search",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Full-text search across Vault → Notes (titles, bodies, folders, tags). Space-separated terms must all match; quote a phrase. Returns matching notes with line snippets; read a hit with vault_notes_get. Can be limited to an area, folder or time range.",
+    policy: {
+      write: false,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: true,
+      bypassesChatCancel: true,
+    },
+    surfaces: {
+      global: { rpcMethod: "vault/notes/search" },
+      public: { rpcMethod: "public/vault/notes/search", mcpTool: "vault_notes_search" },
+    },
+  },
+  {
+    id: "vault.note.move",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Move notes between the daily and organized areas of Vault → Notes. Only the area changes (and the folder when group is given); the text is untouched and the move can be reversed.",
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      global: { rpcMethod: "vault/notes/move" },
+      public: { rpcMethod: "public/vault/notes/move", mcpTool: "vault_notes_move" },
+    },
+  },
+  {
+    id: "vault.note.markOrganized",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Mark daily notes as organized after writing them up, optionally linking them to the organized note (organizedNoteId). Marked notes keep their text and stay in the daily area, hidden by default. undo=true removes the mark.",
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      global: { rpcMethod: "vault/notes/mark-organized" },
+      public: { rpcMethod: "public/vault/notes/mark-organized", mcpTool: "vault_notes_mark_organized" },
     },
   },
   {

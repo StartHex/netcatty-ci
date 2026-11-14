@@ -257,6 +257,9 @@ function handleTerminalSessionSnapshotResponse(event, payload) {
   pending.resolve({
     success: true,
     snapshot: typeof payload?.snapshot === "string" ? payload.snapshot : "",
+    perCharacterInput: typeof payload?.perCharacterInput === "boolean"
+      ? payload.perCharacterInput
+      : undefined,
     kittyKeyboardModeState: normalizeKittyKeyboardModeState(payload?.kittyKeyboardModeState),
     kittyKeyboardProtocolEnabled: typeof payload?.kittyKeyboardProtocolEnabled === "boolean"
       ? payload.kittyKeyboardProtocolEnabled
@@ -316,6 +319,9 @@ function applyTerminalSessionSnapshot(event, payload, terminalWorkerManager = nu
   const contextScrollbackSnapshot = hasContextScrollbackSnapshot ? payload.contextScrollbackSnapshot : "";
   const hasAlternateScreen = typeof payload?.alternateScreen === "boolean";
   const alternateScreen = payload?.alternateScreen === true;
+  const perCharacterInput = typeof payload?.perCharacterInput === "boolean"
+    ? payload.perCharacterInput
+    : undefined;
   const kittyKeyboardModeState = normalizeKittyKeyboardModeState(payload?.kittyKeyboardModeState);
   const kittyKeyboardProtocolEnabled = typeof payload?.kittyKeyboardProtocolEnabled === "boolean"
     ? payload.kittyKeyboardProtocolEnabled
@@ -368,6 +374,7 @@ function applyTerminalSessionSnapshot(event, payload, terminalWorkerManager = nu
           contextViewportSnapshot,
           contextScrollbackSnapshot,
           alternateScreen,
+          perCharacterInput,
           kittyKeyboardModeState,
           kittyKeyboardProtocolEnabled,
           passwordPromptActive,
@@ -980,6 +987,15 @@ async function buildLocalSessionEnv(
 }
 
 /**
+ * Runs the local shell as root through sudo. `-s` would start $SHELL, which
+ * may not be the shell this tab asked for, so the shell is named outright.
+ */
+function buildSudoShellLaunch(shell, shellArgs) {
+  const sudo = fs.existsSync("/usr/bin/sudo") ? "/usr/bin/sudo" : "sudo";
+  return { file: sudo, args: ["--", shell, ...(Array.isArray(shellArgs) ? shellArgs : [])] };
+}
+
+/**
  * Start a local terminal session
  */
 async function startLocalSession(event, payload) {
@@ -1047,16 +1063,40 @@ async function startLocalSession(event, payload) {
     }
   }
   
-  const proc = pty.spawn(shell, shellArgs, {
-    name: env.TERM || "xterm-256color",
-    cols: payload?.cols || 80,
-    rows: payload?.rows || 24,
-    env,
-    cwd,
-    encoding: null, // Return Buffer for ZMODEM binary support
-    // node-pty can only clear ConPTY through its bundled conpty.dll.
-    useConptyDll: process.platform === "win32",
-  });
+  // "Run as administrator" (Windows) / "run as root" (macOS, Linux).
+  const elevated = payload?.elevated === true;
+  let proc;
+  if (elevated && process.platform === "win32") {
+    // An elevated program cannot be started inside this process's own
+    // pseudo-console, so a helper approved through the UAC prompt owns the
+    // console and relays it.
+    const { spawnElevatedPty } = require("./terminalBridge/elevatedLocalPty.cjs");
+    proc = await spawnElevatedPty({
+      shell,
+      args: shellArgs,
+      cols: payload?.cols || 80,
+      rows: payload?.rows || 24,
+      cwd,
+      env,
+    });
+    if (event.sender.isDestroyed?.()) {
+      try { proc.kill(); } catch { /* ignore */ }
+      throw new Error("Local terminal window closed before startup");
+    }
+  } else {
+    // sudo asks for the password inside the terminal, like typing it by hand.
+    const launch = elevated ? buildSudoShellLaunch(shell, shellArgs) : { file: shell, args: shellArgs };
+    proc = pty.spawn(launch.file, launch.args, {
+      name: env.TERM || "xterm-256color",
+      cols: payload?.cols || 80,
+      rows: payload?.rows || 24,
+      env,
+      cwd,
+      encoding: null, // Return Buffer for ZMODEM binary support
+      // node-pty can only clear ConPTY through its bundled conpty.dll.
+      useConptyDll: process.platform === "win32",
+    });
+  }
   
   const session = {
     proc,
@@ -1073,6 +1113,7 @@ async function startLocalSession(event, payload) {
       }
     })(),
     label: "Local Terminal",
+    elevated,
     shellExecutable: shell,
     shellKind,
     flushPendingData: null,
@@ -1707,6 +1748,8 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
   if (data !== "\x03" && !payload.automated && !isTerminalReportSequence(data)) {
     disarmTerminalInterruptOutputGate(session);
   }
+  // Read by the anti-idle watcher (sshBridge/antiIdle.cjs).
+  session.lastActivityAt = Date.now();
 
   try {
     if (
@@ -1727,9 +1770,14 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
     // the transport's native string serialization keeps handling that case.
     sessionLogStreamManager.registerSudoAutofillInput(payload.sessionId, data);
     sessionLogStreamManager.registerProgrammaticCommandLogRewrite(payload.sessionId, logRewrite);
-    const inputData = session.type === 'telnet-native'
-      ? telnetProtocol.normalizeNvtNewlines(data)
+    // xterm onBinary strings contain wire bytes, including values above 127.
+    // Convert before text charset encoding or Telnet newline normalization.
+    const wireInput = payload.binary === true && typeof data === 'string'
+      ? Buffer.from(data, 'latin1')
       : data;
+    const inputData = session.type === 'telnet-native'
+      ? telnetProtocol.normalizeNvtNewlines(wireInput)
+      : wireInput;
     const outgoing = encodeTerminalInput(inputData, session.encoding);
 
     if (session.stream) {

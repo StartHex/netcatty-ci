@@ -57,7 +57,10 @@ declare global {
     openCrashLogsDir?(): Promise<{ success: boolean }>;
 
     // Temp directory management
-    getTempDirInfo?(): Promise<{ path: string; fileCount: number; totalSize: number }>;
+    getTempDirInfo?(): Promise<{ path: string; fileCount: number; totalSize: number; isCustom: boolean; defaultPath: string }>;
+    chooseTempDir?(): Promise<string | null>;
+    setCustomTempDir?(dir: string): Promise<{ ok: boolean; path?: string; error?: string }>;
+    resetCustomTempDir?(): Promise<{ ok: boolean; path?: string; error?: string }>;
     clearTempDir?(): Promise<{ deletedCount: number; failedCount: number; error?: string }>;
     getTempDirPath?(): Promise<string>;
     openTempDir?(): Promise<{ success: boolean }>;
@@ -175,14 +178,16 @@ declare global {
         command?: string;
       };
       error?: { message: string; code?: string; sqlState?: string; position?: number; detail?: string; hint?: string };
+      /** The bridge's view of the session's transaction after this statement. */
+      transactionOpen?: boolean;
     }>;
-    dbControl?(payload: { target: unknown; action: 'begin' | 'commit' | 'rollback' }): Promise<{ ok: boolean; action?: string; error?: { message: string; code?: string; sqlState?: string } }>;
+    dbControl?(payload: { target: unknown; action: 'begin' | 'commit' | 'rollback' }): Promise<{ ok: boolean; action?: string; transactionOpen?: boolean; error?: { message: string; code?: string; sqlState?: string } }>;
     dbTables?(payload: { target: unknown }): Promise<{ ok: boolean; tables?: { schema: string; name: string; type: 'table' | 'view' }[]; error?: { message: string; code?: string; sqlState?: string } }>;
     dbColumns?(payload: { target: unknown; schema?: string; table: string }): Promise<{ ok: boolean; columns?: { name: string; type?: string; nullable?: boolean }[]; error?: { message: string; code?: string; sqlState?: string } }>;
-    dbCancel?(payload: { id: string }): Promise<{ ok: boolean }>;
+    dbCancel?(payload: { id: string }): Promise<{ ok: boolean; cancelled?: boolean }>;
     dbDisconnect?(payload: { id: string }): Promise<{ ok: boolean }>;
     dbDispose?(): Promise<{ ok: boolean }>;
-    dbSaveTextFile(payload: { defaultName?: string; content: string }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+    dbSaveTextFile(payload: { defaultName?: string; content: string; path?: string; filters?: { name: string; extensions: string[] }[] }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
     dbSaveBinaryFile(payload: { defaultName?: string; base64: string }): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
   dbReadSqlFile?(path: string): Promise<{ ok: boolean; text?: string; path?: string; error?: string }>;
     // Curl tool (built-in HTTP client). Requests are fully resolved by the renderer.

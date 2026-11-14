@@ -155,7 +155,7 @@ const formatPluginConnectionExitMessage = (event: TerminalSessionExitEvent): str
   return `\r\n${lines.join("\r\n")}`;
 };
 
-const isAuthFailureMessage = (message: string): boolean => {
+export const isAuthFailureMessage = (message: string): boolean => {
   const normalized = message.toLowerCase();
   return normalized.includes("all configured authentication methods failed") ||
     normalized.includes("authentication failed") ||
@@ -737,6 +737,10 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           jumpHosts: jumpHosts.length > 0 ? jumpHosts : undefined,
           keepaliveInterval: keepalive.interval,
           keepaliveCountMax: keepalive.countMax,
+          antiIdleIntervalSec: ctx.host.antiIdleInterval && ctx.host.antiIdleInterval > 0
+            ? ctx.host.antiIdleInterval
+            : undefined,
+          antiIdleText: ctx.host.antiIdleText,
           sshTcpConnectTimeoutMs: connectionTimeouts.tcpConnectTimeoutSeconds * 1000,
           sshAuthReadyTimeoutMs: connectionTimeouts.authReadyTimeoutSeconds * 1000,
           verifyHostKeys: globalTerminalSettings.verifyHostKeys,
@@ -1900,6 +1904,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         },
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
         bootEpoch,
+        // Administrator (Windows, through the UAC prompt) or root (sudo).
+        elevated: ctx.host.localElevated === true ? true : undefined,
       });
 
       if (!isCurrentAttempt()) {
@@ -1987,7 +1993,11 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       scheduleStartupCommand(ctx, term, id);
     } catch (err) {
       if (ignoreStaleAttemptUi()) return;
-      const message = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      // The UAC prompt was declined: say so plainly instead of the IPC error text.
+      const message = /Administrator permission was not given/.test(rawMessage)
+        ? (ctx.t?.("terminal.local.elevationCancelled") || "Administrator permission was not given")
+        : rawMessage;
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start local shell: ${message}]`);
       ctx.updateStatus("disconnected");

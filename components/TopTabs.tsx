@@ -4,10 +4,11 @@ import { fromEditorTabId, isEditorTabId, toEditorTabId, useActiveTabId } from '.
 import { topTabsSessionsEqual } from '../domain/topTabsSessionsEqual';
 import { isHostTreeWorkTabSurface } from '../application/app/workTabSurface';
 import { buildTabShortcutNumberById } from '../application/app/tabShortcutTargets';
-import { useShortcutModifierHeld } from '../application/state/useShortcutModifierHeld';
+import { useTrackShortcutModifierHeld } from '../application/state/useShortcutModifierHeld';
 import type { EditorTabChrome } from '../application/state/editorTabStore';
 import { toDatabaseTabId, type DatabaseTabSummary } from '../application/state/databaseTabStore';
 import { toCurlTabId, type CurlTabSummary } from '../application/state/curlTabStore';
+import { toNoteTabId } from '../application/state/noteTabStore';
 import { collectSessionIds } from '../domain/workspace';
 import {
   appendHostFromWorkspaceDrop,
@@ -36,7 +37,7 @@ import { GlobalSftpTransferCenter } from './GlobalSftpTransferCenter';
 import { TopTabsQuickControls } from './TopTabsQuickControls';
 import {
   ActiveTabAutoScroller,
-  CurlTopTab,
+  CurlTopTab, NoteTopTab, type NoteTabChrome,
   DatabaseTopTab,
   EditorTopTab,
   LogViewTopTab,
@@ -60,6 +61,11 @@ const dragRegionStyle = { WebkitAppRegion: 'drag' } as React.CSSProperties;
 const dragRegionNoSelect = { WebkitAppRegion: 'drag', userSelect: 'none' } as React.CSSProperties;
 const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as React.CSSProperties;
 const emptyTabStyle: React.CSSProperties = {};
+// Hoisted so the memoized root tabs see a stable icon element every render.
+const VAULT_TAB_ICON = <FolderLock size={14} />;
+const SFTP_TAB_ICON = <Folder size={14} />;
+type WorkspaceTabSessions = { ids: string[]; sessions: TerminalSession[] };
+const EMPTY_WORKSPACE_TAB_SESSIONS: WorkspaceTabSessions = { ids: [], sessions: [] };
 
 export function computeHostTreeTabGutter(hostTreeLayoutWidth: number, toggleRight: number): number {
   return Math.max(0, hostTreeLayoutWidth - toggleRight);
@@ -180,6 +186,9 @@ interface TopTabsProps {
   onCloseDatabaseTab: (tabId: string) => void;
   curlTabs: readonly CurlTabSummary[];
   onCloseCurlTab: (tabId: string) => void;
+  /** Notes opened as tabs; `id` is the note id. */
+  noteTabs: readonly NoteTabChrome[];
+  onCloseNoteTab: (noteId: string) => void;
   onClosePluginViewTab: (tabId: string) => void;
   onRequestCloseEditorTab: (editorTabId: string) => void;
   onPopOutEditorTab?: (editorTabId: string) => void;
@@ -236,6 +245,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
   onCloseDatabaseTab,
   curlTabs,
   onCloseCurlTab,
+  noteTabs,
+  onCloseNoteTab,
   onClosePluginViewTab,
   onRequestCloseEditorTab,
   onPopOutEditorTab,
@@ -254,18 +265,19 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     : hotkeyScheme === 'pc'
       ? switchTabKeyBinding?.pc ?? null
       : null;
-  const shortcutModifierHeld = useShortcutModifierHeld(switchTabKey, hotkeyScheme);
+  // Badges only appear while the switch modifier is held. The held flag is a
+  // small store read by each tab's TabIconSlot, so pressing Ctrl/⌘ does not
+  // re-render the tab bar; the numbers themselves only change with the tabs.
+  useTrackShortcutModifierHeld(showTabNumberBadges ? switchTabKey : null, hotkeyScheme);
   const tabShortcutNumbers = useMemo(() => {
-    // Keep the tab bar quiet until the modifier for the active shortcut scheme
-    // is held, while retaining the existing setting as the master toggle.
-    if (!showTabNumberBadges || hotkeyScheme === 'disabled' || !shortcutModifierHeld) return null;
+    if (!showTabNumberBadges || hotkeyScheme === 'disabled') return null;
     return buildTabShortcutNumberById({
       showSftpTab,
       shellOnlyTabNumberShortcuts,
       orderedTabs,
       editorTabIds: editorTabs.map((tab) => toEditorTabId(tab.id)),
     });
-  }, [hotkeyScheme, showTabNumberBadges, showSftpTab, shellOnlyTabNumberShortcuts, shortcutModifierHeld, orderedTabs, editorTabs]);
+  }, [hotkeyScheme, showTabNumberBadges, showSftpTab, shellOnlyTabNumberShortcuts, orderedTabs, editorTabs]);
   const isHostTreeOpen = useTerminalHostTreeOpen();
   const hostTreeLayoutWidth = useTerminalHostTreeLayoutWidth();
   const toggleHostTree = useToggleTerminalHostTree();
@@ -532,6 +544,26 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     isHostTreeOpen,
   ]);
 
+  // Per-workspace session lists, rebuilt only when workspaces/sessions change
+  // (not on every tab switch, drag frame or modifier change) so the memoized
+  // WorkspaceTopTab keeps its props.
+  const workspaceTabSessions = useMemo(() => {
+    const sessionById = new Map(sessions.map((session) => [session.id, session]));
+    return new Map(workspaces.map((workspace): [string, WorkspaceTabSessions] => {
+      const ids = collectSessionIds(workspace.root);
+      // Detach-menu labels resolve presentation inside WorkspaceTopTab so
+      // dynamic title updates stay live without remapping the whole bar.
+      const workspaceSessions = ids
+        .map((sessionId) => sessionById.get(sessionId))
+        .filter((session): session is TerminalSession => Boolean(session));
+      return [workspace.id, { ids, sessions: workspaceSessions }];
+    }));
+  }, [sessions, workspaces]);
+  const handleDetachSessionFromWorkspace = useCallback(
+    (_workspaceId: string, sessionId: string) => onRemoveSessionFromWorkspace(sessionId),
+    [onRemoveSessionFromWorkspace],
+  );
+
   const handleTabDragStart = useCallback((e: React.DragEvent, tabId: string) => {
     // Payload must be written on the original dragstart. A slow reorder calls
     // this again from `drag`, when DataTransfer is already read-only.
@@ -763,6 +795,11 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     [curlTabs],
   );
 
+  const noteTabMap = useMemo(
+    () => new Map(noteTabs.map((tab) => [toNoteTabId(tab.id), tab])),
+    [noteTabs],
+  );
+
   // fileName → count, for the rename-disambiguation suffix in the render loop.
   // Memoed so we don't do a per-tab O(n) filter on every render (was O(n²)).
   const editorTabFileNameCounts = useMemo(() => {
@@ -786,6 +823,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
       if (databaseTab) return { type: 'database' as const, id: tabId, databaseTab };
       const curlTab = curlTabMap.get(tabId);
       if (curlTab) return { type: 'curl' as const, id: tabId, curlTab };
+      const noteTab = noteTabMap.get(tabId);
+      if (noteTab) return { type: 'note' as const, id: tabId, noteTab };
       const session = orphanSessionMap.get(tabId);
       const workspace = workspaceMap.get(tabId);
       const logView = logViewMap.get(tabId);
@@ -800,7 +839,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
       }
       return null;
     }).filter(Boolean);
-  }, [orderedTabs, editorTabMap, pluginViewTabMap, databaseTabMap, curlTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
+  }, [orderedTabs, editorTabMap, pluginViewTabMap, databaseTabMap, curlTabMap, noteTabMap, orphanSessionMap, workspaceMap, logViewMap, workspacePaneCounts]);
 
   // Bulk-close menu items shared by session and workspace context menus.
   // Anchor is the tab the user right-clicked on (matches VSCode/JetBrains UX).
@@ -961,6 +1000,31 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
         );
       }
 
+      if (item.type === 'note') {
+        const tabId = item.id;
+        return (
+          <NoteTopTab
+            key={tabId}
+            tab={item.noteTab}
+            onClose={onCloseNoteTab}
+            renderBulkCloseItems={renderBulkCloseItems}
+            t={t}
+            isBeingDragged={draggingSessionId === tabId}
+            isDraggingForReorder={isDraggingForReorder}
+            shiftStyle={tabShiftStyles[tabId] || emptyTabStyle}
+            showDropIndicatorBefore={dropIndicator?.tabId === tabId && dropIndicator.position === 'before'}
+            showDropIndicatorAfter={dropIndicator?.tabId === tabId && dropIndicator.position === 'after'}
+            onTabDragStart={handleTabDragStart}
+            onTabDragEnd={handleTabDragEnd}
+            onTabDragOver={handleTabDragOver}
+            onTabDragLeave={handleTabDragLeave}
+            onTabDrop={handleTabDrop}
+            tabAnimationClass={getTabAnimationClass(tabId)}
+            shortcutNumber={tabShortcutNumbers?.get(tabId)}
+          />
+        );
+      }
+
       if (item.type === 'session') {
         const session = item.session;
         const isBeingDragged = draggingSessionId === session.id;
@@ -1006,20 +1070,15 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
         const shiftStyle = tabShiftStyles[workspace.id] || emptyTabStyle;
         const showDropIndicatorBefore = dropIndicator?.tabId === workspace.id && dropIndicator.position === 'before';
         const showDropIndicatorAfter = dropIndicator?.tabId === workspace.id && dropIndicator.position === 'after';
-        const workspaceSessionIds = collectSessionIds(workspace.root);
-        // Detach-menu labels resolve presentation inside WorkspaceTopTab so
-        // dynamic title updates stay live without remapping the whole bar.
-        const workspaceSessions = workspaceSessionIds
-          .map((sessionId) => sessions.find((s) => s.id === sessionId))
-          .filter((s): s is TerminalSession => Boolean(s));
+        const workspaceSessionLists = workspaceTabSessions.get(workspace.id) ?? EMPTY_WORKSPACE_TAB_SESSIONS;
 
         return (
           <WorkspaceTopTab
             key={workspace.id}
             workspace={workspace}
             paneCount={paneCount}
-            workspaceSessionIds={workspaceSessionIds}
-            workspaceSessions={workspaceSessions}
+            workspaceSessionIds={workspaceSessionLists.ids}
+            workspaceSessions={workspaceSessionLists.sessions}
             dynamicTabTitleMode={dynamicTabTitleMode}
             isBeingDragged={isBeingDragged}
             isDraggingForReorder={isDraggingForReorder}
@@ -1035,7 +1094,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             onRenameWorkspace={onRenameWorkspace}
             onCopyWorkspace={onCopyWorkspace}
             onCloseWorkspace={onCloseWorkspace}
-            onDetachSessionFromWorkspace={(_workspaceId, sessionId) => onRemoveSessionFromWorkspace(sessionId)}
+            onDetachSessionFromWorkspace={handleDetachSessionFromWorkspace}
             renderBulkCloseItems={renderBulkCloseItems}
             t={t}
             tabAnimationClass={getTabAnimationClass(workspace.id)}
@@ -1117,7 +1176,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
           <RootTopTab
             tabId="vault"
             label="Vaults"
-            icon={<FolderLock size={14} />}
+            icon={VAULT_TAB_ICON}
             className="rounded"
             compact={rootTabsCompact}
             shortcutNumber={tabShortcutNumbers?.get('vault')}
@@ -1126,7 +1185,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             <RootTopTab
               tabId="sftp"
               label="SFTP"
-              icon={<Folder size={14} />}
+              icon={SFTP_TAB_ICON}
               className="rounded-t-md"
               compact={rootTabsCompact}
               shortcutNumber={tabShortcutNumbers?.get('sftp')}
@@ -1380,6 +1439,8 @@ export const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean
     prev.databaseTabs === next.databaseTabs &&
     prev.curlTabs === next.curlTabs &&
     prev.onCloseCurlTab === next.onCloseCurlTab &&
+    prev.noteTabs === next.noteTabs &&
+    prev.onCloseNoteTab === next.onCloseNoteTab &&
     prev.onCloseDatabaseTab === next.onCloseDatabaseTab &&
     prev.draggingSessionId === next.draggingSessionId &&
     prev.isMacClient === next.isMacClient &&

@@ -19,7 +19,7 @@ import {
   requestSnapshotFrom,
   responseSnapshotFrom,
 } from '../../domain/http/history';
-import { cancelHttpRequest, formatHttpError, sendHttpRequest } from '../../infrastructure/services/httpClientService';
+import { cancelHttpRequest, sendHttpRequest } from '../../infrastructure/services/httpClientService';
 import { useI18n } from '../i18n/I18nProvider';
 import { curlTabStore, useCurlTabRequest } from './curlTabStore';
 import { useHttpHistory } from './useHttpHistory';
@@ -35,6 +35,10 @@ export interface CurlTab {
   error?: string;
   warnings?: HttpWireWarning[];
   inFlightId?: string;
+  /** Epoch ms when the in-flight request left; drives the elapsed timer. */
+  sentAt?: number;
+  /** Epoch ms of the last completed attempt; keys the response fade-in. */
+  completedAt?: number;
 }
 
 export interface UseHttpClientOptions {
@@ -89,10 +93,39 @@ const titleFor = (request: CurlRequest): string =>
 const isSameDraft = (left: CurlRequest, right: CurlRequest): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
+const HTTP_ERROR_MESSAGE_KEYS: Record<string, string> = {
+  'invalid-request': 'curl.errors.invalidRequest',
+  'invalid-url': 'curl.errors.invalidUrl',
+  'too-many-redirects': 'curl.errors.tooManyRedirects',
+  timeout: 'curl.errors.timeout',
+  dns: 'curl.errors.dns',
+  tls: 'curl.errors.tls',
+  connection: 'curl.errors.connection',
+  cancelled: 'curl.errors.cancelled',
+};
+
+/** Localized one-line message for a bridge error, keeping the driver code as detail. */
+export function describeHttpError(
+  error: { code: string; message: string; detail?: string },
+  t: (key: string) => string,
+): string {
+  const key = HTTP_ERROR_MESSAGE_KEYS[error.code];
+  if (!key) return error.message || t('curl.errors.unknown');
+  const base = t(key);
+  return error.detail ? `${base} (${error.detail})` : base;
+}
+
 export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptions): UseHttpClientResult {
   const [tabs, setTabs] = useState<CurlTab[]>([]);
   const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
   const tabsRef = useRef<CurlTab[]>([]);
+  /**
+   * Tab id -> wire id of the request that is allowed to report back. Updated
+   * synchronously, so a double click cannot send twice and a response that
+   * lands after cancel / close / a newer send is dropped instead of
+   * overwriting newer state.
+   */
+  const inFlightRef = useRef(new Map<string, string>());
   const requestsRef = useRef<readonly CurlRequest[]>(requests);
   const hydratedRef = useRef(false);
   const activeTabIdRef = useRef<string | null>(null);
@@ -154,9 +187,28 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
     curlTabStore.activate(tab.id);
   }, [createTab, setActiveTabId]);
 
+  // The copy is a detached, unsaved draft: two tabs bound to one saved request
+  // would overwrite each other on save.
+  const duplicateTab = useCallback((tabId: string) => {
+    const source = tabsRef.current.find((item) => item.id === tabId);
+    if (!source) return;
+    const now = Date.now();
+    const draft: CurlRequest = { ...cloneRequest(source.draft), id: makeId('req'), createdAt: now, updatedAt: now };
+    delete draft.lastUsedAt;
+    const tab = createTab(draft);
+    setTabs((current) => {
+      const index = current.findIndex((item) => item.id === tabId);
+      return index < 0 ? [...current, tab] : [...current.slice(0, index + 1), tab, ...current.slice(index + 1)];
+    });
+    setActiveTabId(tab.id);
+    curlTabStore.activate(tab.id);
+  }, [createTab, setActiveTabId]);
+
   const closeTab = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((item) => item.id === tabId);
-    if (tab?.inFlightId) void cancelHttpRequest(tab.inFlightId);
+    const inFlight = inFlightRef.current.get(tabId) ?? tab?.inFlightId;
+    inFlightRef.current.delete(tabId);
+    if (inFlight) void cancelHttpRequest(inFlight);
     setTabs((current) => {
       const remaining = current.filter((item) => item.id !== tabId);
       if (activeTabIdRef.current === tabId) {
@@ -266,43 +318,60 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
   const send = useCallback(
     async (tabId: string) => {
       const tab = tabsRef.current.find((item) => item.id === tabId);
-      if (!tab || tab.status === 'sending') return;
+      if (!tab || tab.status === 'sending' || inFlightRef.current.has(tabId)) return;
       const wireId = makeId('wire');
       const built = buildHttpWireRequest(tab.draft);
       if (!built.ok) {
-        patchTab(tabId, { status: 'error', error: t('curl.errors.invalidUrl'), response: undefined });
+        patchTab(tabId, {
+          status: 'error',
+          error: t('curl.errors.invalidUrl'),
+          response: undefined,
+          completedAt: Date.now(),
+        });
         return;
       }
+      inFlightRef.current.set(tabId, wireId);
       patchTab(tabId, {
         status: 'sending',
         error: undefined,
         warnings: built.warnings,
         inFlightId: wireId,
+        sentAt: Date.now(),
       });
       const result = await sendHttpRequest({ ...built.wire, id: wireId });
+      // Cancelled, closed or superseded while we waited: the caller already moved on.
+      if (inFlightRef.current.get(tabId) !== wireId) return;
+      inFlightRef.current.delete(tabId);
+      const requestSnapshot = requestSnapshotFrom(
+        tab.draft.method,
+        built.wire.url,
+        built.wire.headers,
+        tab.draft.body.kind,
+        built.wire.bodyText,
+      );
       if (result.ok) {
         patchTab(tabId, {
           status: 'done',
           response: result.response,
           error: undefined,
           inFlightId: undefined,
+          sentAt: undefined,
+          completedAt: Date.now(),
         });
-        const decodedBody =
-          result.response.bodyText ?? decodeResponseBody(result.response.bodyBase64, 'utf-8') ?? undefined;
-        history.record({
-          method: tab.draft.method,
-          url: built.wire.url,
-          status: result.response.status,
-          durationMs: result.response.durationMs,
-          request: requestSnapshotFrom(
-            tab.draft.method,
-            built.wire.url,
-            built.wire.headers,
-            tab.draft.body.kind,
-            built.wire.bodyText,
-          ),
-          response: responseSnapshotFrom(result.response, decodedBody),
-        });
+        try {
+          const decodedBody =
+            result.response.bodyText ?? decodeResponseBody(result.response.bodyBase64, 'utf-8') ?? undefined;
+          history.record({
+            method: tab.draft.method,
+            url: built.wire.url,
+            status: result.response.status,
+            durationMs: result.response.durationMs,
+            request: requestSnapshot,
+            response: responseSnapshotFrom(result.response, decodedBody),
+          });
+        } catch {
+          // History is a convenience; it must never turn a good response into an error.
+        }
         return;
       }
       const error = (result.ok === false ? result.error : { code: 'unknown', message: 'Request failed' }) as {
@@ -312,33 +381,42 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
       };
       patchTab(tabId, {
         status: 'error',
-        error: formatHttpError(error),
+        error: describeHttpError(error, t),
         inFlightId: undefined,
+        sentAt: undefined,
+        completedAt: Date.now(),
       });
-      history.record({
-        method: tab.draft.method,
-        url: built.wire.url,
-        status: 0,
-        durationMs: 0,
-        request: requestSnapshotFrom(
-          tab.draft.method,
-          built.wire.url,
-          built.wire.headers,
-          tab.draft.body.kind,
-          built.wire.bodyText,
-        ),
-        response: errorSnapshotFrom(error),
-      });
+      if (error.code === 'cancelled') return;
+      try {
+        history.record({
+          method: tab.draft.method,
+          url: built.wire.url,
+          status: 0,
+          durationMs: 0,
+          request: requestSnapshot,
+          response: errorSnapshotFrom(error),
+        });
+      } catch {
+        // see above
+      }
     },
     [history, patchTab, t],
   );
 
   const cancel = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((item) => item.id === tabId);
-    if (!tab?.inFlightId) return;
-    void cancelHttpRequest(tab.inFlightId);
-    patchTab(tabId, { status: 'idle', inFlightId: undefined });
-  }, [patchTab]);
+    const inFlight = inFlightRef.current.get(tabId) ?? tab?.inFlightId;
+    if (!inFlight) return;
+    inFlightRef.current.delete(tabId);
+    void cancelHttpRequest(inFlight);
+    patchTab(tabId, {
+      status: 'idle',
+      inFlightId: undefined,
+      sentAt: undefined,
+      error: t('curl.errors.cancelled'),
+      completedAt: Date.now(),
+    });
+  }, [patchTab, t]);
 
   const saveTab = useCallback(
     async (tabId: string) => {
@@ -359,6 +437,15 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
     },
     [onUpdateRequests, patchTab],
   );
+
+  // Tearing the surface down abandons every response, so stop the sockets too.
+  useEffect(() => {
+    const inFlight = inFlightRef.current;
+    return () => {
+      for (const wireId of inFlight.values()) void cancelHttpRequest(wireId);
+      inFlight.clear();
+    };
+  }, []);
 
   // Hydrate persisted tabs once the vault has had a chance to load.
   useEffect(() => {
@@ -421,9 +508,11 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
       else openBlank();
     } else if (request.type === 'close') {
       closeTab(request.tabId);
+    } else if (request.type === 'duplicate') {
+      duplicateTab(request.tabId);
     }
     curlTabStore.clearRequest(request.nonce);
-  }, [request, openSaved, openBlank, closeTab]);
+  }, [request, openSaved, openBlank, closeTab, duplicateTab]);
 
   const savedRequests = useMemo(() => sortCurlRequests(requests ?? []), [requests]);
 

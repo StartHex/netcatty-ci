@@ -6,7 +6,6 @@
 
 import {
   ChevronDown,
-  ChevronRight,
   Copy,
   Database,
   Download,
@@ -29,7 +28,21 @@ import {
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
-import { VaultHeaderSearch, VaultPageHeader, vaultHeaderSecondaryButtonClass } from '../vault/VaultPageHeader';
+import {
+  VaultHeaderSearch,
+  VaultPageHeader,
+  vaultHeaderIconButtonClass,
+  vaultHeaderSecondaryButtonClass,
+  vaultSectionTitleClass,
+} from '../vault/VaultPageHeader';
+import { VaultEntityIcon } from '../vault/VaultEntityIcon';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '../ui/context-menu';
 import type { DbTestConnectionResult } from '../../domain/models';
 import { DatabaseConnectionDialog } from './DatabaseConnectionDialog';
 import { JdbcDriversDialog } from './JdbcDriversDialog';
@@ -38,14 +51,15 @@ import { mergeImported } from '../../domain/database/connectionTransfer';
 import { useDatabaseConfigTransfer } from '../../application/state/useDatabaseConfigTransfer';
 import { toast } from '../ui/toast';
 
-const KIND_ACCENT: Record<DatabaseKind, string> = {
-  postgresql: 'text-sky-500',
-  mysql: 'text-amber-500',
-  mariadb: 'text-orange-500',
-  oracle: 'text-red-500',
-  sqlserver: 'text-blue-500',
-  sqlite: 'text-emerald-500',
-  jdbc: 'text-violet-500',
+/** Filled tiles, like the key / proxy / snippet icons elsewhere in the vault. */
+const KIND_ICON_CLASS: Record<DatabaseKind, string> = {
+  postgresql: 'bg-sky-600 text-white dark:bg-sky-400 dark:text-slate-950',
+  mysql: 'bg-amber-600 text-white dark:bg-amber-400 dark:text-slate-950',
+  mariadb: 'bg-orange-600 text-white dark:bg-orange-400 dark:text-slate-950',
+  oracle: 'bg-red-600 text-white dark:bg-red-400 dark:text-slate-950',
+  sqlserver: 'bg-blue-600 text-white dark:bg-blue-400 dark:text-slate-950',
+  sqlite: 'bg-emerald-600 text-white dark:bg-emerald-400 dark:text-slate-950',
+  jdbc: 'bg-violet-600 text-white dark:bg-violet-400 dark:text-slate-950',
 };
 
 const COLOR_TAG_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {
@@ -218,73 +232,80 @@ export const DatabasesManager: React.FC<DatabasesManagerProps> = ({
   return (
     <div className="flex h-full flex-col">
       <VaultPageHeader>
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <h2 className="truncate text-sm font-semibold">{t('databases.title')}</h2>
-          <span className="text-xs text-muted-foreground">
-            {t('databases.count', { count: String(dbConnections.length) })}
-          </span>
-        </div>
-        <VaultHeaderSearch
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={t('databases.search.placeholder')}
-          className="w-[240px]"
-        />
-        <Button
-          className={cn(vaultHeaderSecondaryButtonClass, 'h-9')}
-          disabled={transferring || dbConnections.length === 0}
-          onClick={() => void exportConfig()}
-        >
-          <Download className="mr-1.5 h-3.5 w-3.5" />
-          {t('databases.transfer.export')}
-        </Button>
-        <Button
-          className={cn(vaultHeaderSecondaryButtonClass, 'h-9')}
-          disabled={transferring}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Upload className="mr-1.5 h-3.5 w-3.5" />
-          {t('databases.transfer.import')}
-        </Button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void importConfig(file);
-          }}
-        />
-        {onUpdateJdbcDrivers ? (
-          <Button
-            className={cn(vaultHeaderSecondaryButtonClass, 'h-9')}
-            onClick={() => setDriversOpen(true)}
-          >
-            <PlugZap className="mr-1.5 h-3.5 w-3.5" />
-            {t('databases.drivers.open')}
-          </Button>
-        ) : null}
-        <Button className={cn(vaultHeaderSecondaryButtonClass, 'h-9')} onClick={openCreate}>
-          <Plus className="mr-1.5 h-3.5 w-3.5" />
+        <Button onClick={openCreate} variant="secondary" className={vaultHeaderSecondaryButtonClass}>
+          <Plus size={14} />
           {t('databases.new')}
         </Button>
+        <div className="ml-auto flex min-w-0 flex-shrink items-center gap-2">
+          <VaultHeaderSearch
+            aria-label={t('databases.search.placeholder')}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t('databases.search.placeholder')}
+            className="w-64 flex-shrink"
+          />
+          {onUpdateJdbcDrivers ? (
+            <Button
+              variant="secondary"
+              className={cn(vaultHeaderSecondaryButtonClass, 'flex-shrink-0')}
+              onClick={() => setDriversOpen(true)}
+            >
+              <PlugZap size={14} />
+              {t('databases.drivers.open')}
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(vaultHeaderIconButtonClass, 'flex-shrink-0')}
+            aria-label={t('databases.transfer.import')}
+            title={t('databases.transfer.import')}
+            disabled={transferring}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={16} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(vaultHeaderIconButtonClass, 'flex-shrink-0')}
+            aria-label={t('databases.transfer.export')}
+            title={t('databases.transfer.export')}
+            disabled={transferring || dbConnections.length === 0}
+            onClick={() => void exportConfig()}
+          >
+            <Download size={16} />
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importConfig(file);
+            }}
+          />
+        </div>
       </VaultPageHeader>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="space-y-3 p-3">
+          <div className="flex items-center justify-between">
+            <h2 className={vaultSectionTitleClass}>{t('databases.title')}</h2>
+            <span className="text-xs text-muted-foreground">
+              {t('databases.count', { count: String(dbConnections.length) })}
+            </span>
+          </div>
         {connections.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-secondary">
-              <Database className="h-6 w-6 text-muted-foreground" />
+          <div className="flex h-64 flex-col items-center justify-center text-muted-foreground">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-secondary/80">
+              <Database size={32} className="opacity-60" />
             </div>
-            <div>
-              <p className="text-sm font-medium">{t('databases.empty.title')}</p>
-              <p className="mt-1 max-w-md text-xs text-muted-foreground">
-                {t('databases.empty.description')}
-              </p>
-            </div>
+            <h3 className="mb-2 text-lg font-semibold text-foreground">{t('databases.empty.title')}</h3>
+            <p className="mb-4 max-w-sm text-center text-sm">{t('databases.empty.description')}</p>
             <Button onClick={openCreate}>
-              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              <Plus size={14} className="mr-2" />
               {t('databases.new')}
             </Button>
           </div>
@@ -297,80 +318,104 @@ export const DatabasesManager: React.FC<DatabasesManagerProps> = ({
                   {grouped.length > 1 || group ? (
                     <button
                       type="button"
-                      className="mb-2 flex w-full items-center gap-1.5 text-left text-xs font-medium text-muted-foreground hover:text-foreground"
+                      className="mb-2 flex w-full items-center gap-1.5 rounded text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-expanded={!collapsed}
                       onClick={() => toggleGroup(group)}
                     >
-                      {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                      <ChevronDown
+                        className={cn('h-3 w-3 transition-transform duration-200', collapsed && '-rotate-90')}
+                      />
                       <span className="truncate">{group || t('databases.groupUngrouped')}</span>
                       <span className="text-[10px] opacity-70">{items.length}</span>
                     </button>
                   ) : null}
                   {collapsed ? null : (
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {items.map((connection) => (
-              <div
-                key={connection.id}
-                className="group flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-3 transition-colors hover:border-border"
-              >
-                <div className="flex items-start gap-2">
-                  <span className="relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-                    <Database className={cn('h-4 w-4 shrink-0', KIND_ACCENT[connection.kind])} />
-                    {connection.colorTag && connection.colorTag !== 'none' ? (
-                      <span
-                        className={cn(
-                          'absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full ring-1 ring-card',
-                          COLOR_TAG_CLASS[connection.colorTag],
-                        )}
-                      />
-                    ) : null}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="truncate text-sm font-medium">{connection.label}</p>
-                      <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {t(`databases.kind.${connection.kind}`)}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                      {databaseDisplayTarget(connection)}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Button size="sm" className="h-7 flex-1 text-xs" onClick={() => open(connection)}>
-                    <Play className="mr-1 h-3 w-3" />
-                    {t('databases.open')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 w-7 p-0"
-                    title={t('databases.edit')}
-                    onClick={() => openEdit(connection)}
-                  >
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 w-7 p-0"
-                    title={t('databases.clone')}
-                    onClick={() => clone(connection)}
-                  >
-                    <Copy className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                    title={t('databases.delete')}
-                    onClick={() => setPendingDelete(connection)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
-            ))}
+                    <div className="nc-stagger grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                      {items.map((connection) => (
+                        <ContextMenu key={connection.id}>
+                          <ContextMenuTrigger asChild>
+                            <div className="soft-card elevate group relative flex h-[68px] items-center gap-3 rounded-xl px-3 py-2 focus-within:ring-2 focus-within:ring-ring">
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none"
+                                aria-label={`${t('databases.open')} ${connection.label}`}
+                                onClick={() => open(connection)}
+                              >
+                                <span className="relative shrink-0">
+                                  <VaultEntityIcon
+                                    className={KIND_ICON_CLASS[connection.kind]}
+                                    title={t(`databases.kind.${connection.kind}`)}
+                                    icon={<Database size={18} />}
+                                  />
+                                  {connection.colorTag && connection.colorTag !== 'none' ? (
+                                    <span
+                                      className={cn(
+                                        'absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-background',
+                                        COLOR_TAG_CLASS[connection.colorTag],
+                                      )}
+                                    />
+                                  ) : null}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate text-sm font-semibold">{connection.label}</span>
+                                    <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                      {t(`databases.kind.${connection.kind}`)}
+                                    </span>
+                                  </span>
+                                  <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                                    {databaseDisplayTarget(connection)}
+                                  </span>
+                                </span>
+                              </button>
+                              <div className="flex shrink-0 items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  aria-label={t('databases.edit')}
+                                  title={t('databases.edit')}
+                                  onClick={() => openEdit(connection)}
+                                >
+                                  <Pencil size={14} />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  aria-label={t('databases.clone')}
+                                  title={t('databases.clone')}
+                                  onClick={() => clone(connection)}
+                                >
+                                  <Copy size={14} />
+                                </Button>
+                              </div>
+                            </div>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent>
+                            <ContextMenuItem onClick={() => open(connection)}>
+                              <Play size={14} className="mr-2" />
+                              {t('databases.open')}
+                            </ContextMenuItem>
+                            <ContextMenuItem onClick={() => openEdit(connection)}>
+                              <Pencil size={14} className="mr-2" />
+                              {t('databases.edit')}
+                            </ContextMenuItem>
+                            <ContextMenuItem onClick={() => clone(connection)}>
+                              <Copy size={14} className="mr-2" />
+                              {t('databases.clone')}
+                            </ContextMenuItem>
+                            <ContextMenuSeparator />
+                            <ContextMenuItem
+                              onClick={() => setPendingDelete(connection)}
+                              className="text-destructive focus:text-destructive"
+                            >
+                              <Trash2 size={14} className="mr-2" />
+                              {t('databases.delete')}
+                            </ContextMenuItem>
+                          </ContextMenuContent>
+                        </ContextMenu>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -378,6 +423,7 @@ export const DatabasesManager: React.FC<DatabasesManagerProps> = ({
             })}
           </div>
         )}
+        </div>
       </div>
 
       <DatabaseConnectionDialog

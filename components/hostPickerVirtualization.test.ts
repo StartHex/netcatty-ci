@@ -103,6 +103,13 @@ test('FixedSizeVirtualList uses shared window math (render path clamp)', () => {
   assert.match(source, /effectiveScrollTop/);
 });
 
+test('FixedSizeVirtualList never writes its trailing state back into the DOM scroll position', () => {
+  // The state lags the real position by a frame while scrolling; writing it
+  // back made the viewport jump backwards (visible stutter in the SQL results).
+  const source = read('ui/FixedSizeVirtualList.tsx');
+  assert.doesNotMatch(source, /container\.scrollTop = effectiveScrollTop/);
+});
+
 test('shipped virtual window math proves large lists only render a viewport slice', () => {
   const window = getFixedSizeVirtualWindow({
     itemCount: 8_000,

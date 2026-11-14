@@ -8,6 +8,17 @@ export interface InlineMarkdownEditorHandle {
 
 export type NoteEditorMode = "edit" | "preview" | "source" | "live";
 
+/**
+ * Search highlighting requested by the notes tree. Every occurrence of the
+ * terms is painted; `activeOccurrence` (0-based, document order) gets the
+ * strong color, and each new `revealToken` scrolls it into view once.
+ */
+export interface NoteSearchHighlightRequest {
+  terms: readonly string[];
+  activeOccurrence: number | null;
+  revealToken: number;
+}
+
 /** Active text-format toggles at the current selection (toolbar highlight). */
 export type ActiveTextFormats = {
   bold: boolean;

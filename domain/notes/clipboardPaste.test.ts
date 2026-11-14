@@ -12,7 +12,13 @@ import {
   normalizeLinkedBadgeImages,
   normalizeNotePublicAssetPaths,
   normalizePastedNoteMarkdown,
+  escapeStrayAngleBrackets,
+  conversionLostLineBreaks,
   plainMarkdownContainsHtml,
+  preserveMarkdownLineBreaks,
+  shouldInsertPlainNotePasteWithLineBreaks,
+  splitPlainTextForNoteInsert,
+  plainTextContainsCompleteHtmlTag,
   resolveNoteClipboardPaste,
   serializeSafeHtmlImage,
   shouldInterceptResolvedNotePaste,
@@ -587,4 +593,170 @@ test("extractBalancedHtmlElement handles raw-text script bodies with <", () => {
   assert.equal(extracted?.tag, "script");
   assert.match(extracted?.full ?? "", /if \(a < b\)/);
   assert.equal(source.slice(extracted?.end ?? 0), "\n# after");
+});
+
+// ---------------------------------------------------------------------------
+// Stray angle brackets: passwords / tokens / comparisons must paste verbatim.
+// ---------------------------------------------------------------------------
+
+test("a token with a stray < pastes verbatim as plain text (Uf7,Ly2<c8)", () => {
+  // Used to be classified as an HTML fragment because of "<c": the HTML parser
+  // then read "<c8" as an unterminated tag and the paste lost it or failed.
+  for (const text of ["Uf7,Ly2<c8", "pw: aB3<x9!", "a<b", "if (count<max) return", "x <y", "<c8", "1 < 2 and 3 > 2"]) {
+    const payload = resolveNoteClipboardPaste({ plainText: text, htmlText: "" });
+    assert.deepEqual(payload, { text, kind: "plain" }, text);
+    assert.equal(
+      shouldInterceptResolvedNotePaste({ editorMode: "edit", pasteInsideCodeBlock: false, payload }),
+      false,
+      "plain text is left to the editor's native paste",
+    );
+  }
+});
+
+test("HTML that only wraps the same plain text does not replace it", () => {
+  // What a browser / terminal puts on the clipboard for a plain selection.
+  const payload = resolveNoteClipboardPaste({
+    plainText: "Uf7,Ly2<c8",
+    htmlText: '<meta charset="utf-8"><span style="color: rgb(0, 0, 0);">Uf7,Ly2&lt;c8</span>',
+  });
+  assert.deepEqual(payload, { text: "Uf7,Ly2<c8", kind: "plain" });
+});
+
+test("plainTextContainsCompleteHtmlTag needs a whole tag, not a bare <", () => {
+  for (const text of ["Uf7,Ly2<c8", "a<b", "List<string", "x < y > z", "cost<5 && size>3", "<3 this"]) {
+    assert.equal(plainTextContainsCompleteHtmlTag(text), false, text);
+  }
+  for (const text of ["<div>x</div>", "<br/>", '<img src="a.png">', "text </p>", "<!-- note -->", "<a href='x'>y</a>"]) {
+    assert.equal(plainTextContainsCompleteHtmlTag(text), true, text);
+  }
+});
+
+test("escapeStrayAngleBrackets makes non-markup < literal for the MDX parser", () => {
+  assert.equal(escapeStrayAngleBrackets("# Passwords\n\n- db: Uf7,Ly2<c8"), "# Passwords\n\n- db: Uf7,Ly2\\<c8");
+  assert.equal(escapeStrayAngleBrackets("**note** a < b and c<d"), "**note** a \\< b and c\\<d");
+  assert.equal(escapeStrayAngleBrackets("use `List<string>` or List<string>"), "use `List<string>` or List\\<string>");
+  assert.equal(escapeStrayAngleBrackets("run mysql -h <host> -u <user>"), "run mysql -h \\<host> -u \\<user>");
+  assert.equal(escapeStrayAngleBrackets("Map<string, number>"), "Map\\<string, number>");
+  // Already escaped stays as is.
+  assert.equal(escapeStrayAngleBrackets("a \\< b"), "a \\< b");
+});
+
+test("escapeStrayAngleBrackets keeps real markup and code untouched", () => {
+  const kept = [
+    '<div align="center">\n\n# Title\n\n</div>',
+    '<img src="a.png" width="10" />',
+    "line<br/>break",
+    "<!-- comment -->",
+    "<kbd>Ctrl</kbd> + <kbd>C</kbd>",
+    "<my-widget size=\"2\">x</my-widget>",
+    "```html\n<c8 and <host>\n```",
+    "    indented <c8 code",
+  ];
+  for (const markdown of kept) assert.equal(escapeStrayAngleBrackets(markdown), markdown, markdown);
+});
+
+test("escapeStrayAngleBrackets turns autolinks (rejected by MDX) into bare URLs", () => {
+  assert.equal(escapeStrayAngleBrackets("see <https://example.com/a?b=1> now"), "see https://example.com/a?b=1 now");
+  assert.equal(escapeStrayAngleBrackets("<mailto:a@b.co>"), "mailto:a@b.co");
+});
+
+test("markdown pastes escape stray < instead of failing in the editor", () => {
+  const payload = resolveNoteClipboardPaste({
+    plainText: "# Servers\n\n- root password: Uf7,Ly2<c8\n- rule: a<b",
+    htmlText: "",
+  });
+  assert.equal(payload.kind, "markdown");
+  assert.equal(payload.text, "# Servers\n\n- root password: Uf7,Ly2\\<c8\n- rule: a\\<b");
+});
+
+// ---------------------------------------------------------------------------
+// Line breaks of pasted external documents.
+// ---------------------------------------------------------------------------
+
+test("markdown pastes keep single line breaks as hard breaks", () => {
+  const input = [
+    "# 部署步骤",
+    "服务器：10.0.0.8",
+    "端口：22",
+    "账号：root",
+    "",
+    "- 第一步",
+    "  说明文字",
+    "- 第二步",
+    "> 引用一",
+    "> 引用二",
+    "",
+    "| a | b |",
+    "| - | - |",
+    "| 1 | 2 |",
+    "",
+    "```",
+    "line1",
+    "line2",
+    "```",
+    "结尾一",
+    "结尾二",
+  ].join("\n");
+  const out = preserveMarkdownLineBreaks(input).split("\n");
+  assert.equal(out[0], "# 部署步骤", "headings never get a break");
+  assert.equal(out[1], "服务器：10.0.0.8  ");
+  assert.equal(out[2], "端口：22  ");
+  assert.equal(out[3], "账号：root", "last line of a paragraph is untouched");
+  assert.equal(out[5], "- 第一步  ", "continuation text of a list item keeps its line");
+  assert.equal(out[6], "  说明文字", "next line starts a new list item");
+  assert.equal(out[8], "> 引用一  ", "quote lines stay separate lines");
+  assert.equal(out[9], "> 引用二");
+  assert.deepEqual(out.slice(11, 14), ["| a | b |", "| - | - |", "| 1 | 2 |"], "tables untouched");
+  assert.deepEqual(out.slice(15, 19), ["```", "line1", "line2", "```"], "code untouched");
+  assert.equal(out[19], "结尾一  ");
+  assert.equal(out[20], "结尾二");
+  // Idempotent: existing hard breaks are not doubled.
+  assert.equal(preserveMarkdownLineBreaks(out.join("\n")), out.join("\n"));
+});
+
+test("a pasted document with markdown-looking lines keeps every line", () => {
+  const payload = resolveNoteClipboardPaste({
+    plainText: "会议记录\n时间：周三\n地点：三楼\n- 议题一\n- 议题二",
+    htmlText: "",
+  });
+  assert.equal(payload.kind, "markdown");
+  assert.equal(payload.text, "会议记录  \n时间：周三  \n地点：三楼\n- 议题一\n- 议题二");
+});
+
+test("conversionLostLineBreaks detects a flattened HTML conversion", () => {
+  assert.equal(conversionLostLineBreaks("a\nb\nc\nd", "a b c d"), true);
+  assert.equal(conversionLostLineBreaks("a\nb\nc\nd", "a\n\nb\n\nc\n\nd"), false);
+  assert.equal(conversionLostLineBreaks("a\nb\nc\nd", "**a**  \nb  \nc"), false);
+  assert.equal(conversionLostLineBreaks("single line", "single line"), false);
+});
+
+test("HTML that folds the lines away loses to the plain text", () => {
+  // pre-wrap sources (chat apps, online docs, terminals): the newlines are
+  // real characters, which HTML whitespace rules collapse to spaces.
+  const payload = resolveNoteClipboardPaste({
+    plainText: "第一行\n第二行\n第三行\n第四行",
+    htmlText: '<span style="white-space: pre-wrap; font-weight: 600;">第一行\n第二行\n第三行\n第四行</span>',
+  });
+  assert.deepEqual(payload, { text: "第一行\n第二行\n第三行\n第四行", kind: "plain" });
+  assert.equal(
+    shouldInsertPlainNotePasteWithLineBreaks({ editorMode: "edit", pasteInsideCodeBlock: false, payload }),
+    true,
+  );
+});
+
+test("plain multi-line text is split into paragraphs and lines for insertion", () => {
+  assert.deepEqual(
+    splitPlainTextForNoteInsert("\r\n第一行\r\n第二行\r\n\r\n\r\n第二段\n\tindented\n"),
+    [["第一行", "第二行"], ["第二段", "\tindented"]],
+  );
+  assert.deepEqual(splitPlainTextForNoteInsert("\n\n"), []);
+  const single = { text: "one line", kind: "plain" as const };
+  assert.equal(
+    shouldInsertPlainNotePasteWithLineBreaks({ editorMode: "edit", pasteInsideCodeBlock: false, payload: single }),
+    false,
+    "single-line text stays with the default paste",
+  );
+  const multi = { text: "a\nb", kind: "plain" as const };
+  assert.equal(shouldInsertPlainNotePasteWithLineBreaks({ editorMode: "edit", pasteInsideCodeBlock: true, payload: multi }), false);
+  assert.equal(shouldInsertPlainNotePasteWithLineBreaks({ editorMode: "source", pasteInsideCodeBlock: false, payload: multi }), false);
 });

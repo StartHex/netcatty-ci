@@ -21,8 +21,41 @@ const MAX_BODY_BASE64_BYTES = 4 * 1024 * 1024;
 const MAX_HEADER_COUNT = 200;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-/** One entry per in-flight request so `cancel` can abort it. */
+/** Decoded (decompressed) bodies are capped too, so a gzip bomb cannot exhaust memory. */
+const MAX_DECODED_BODY_BYTES = MAX_BODY_BYTES;
+/** A cancel that arrives before its request registered is remembered this long. */
+const EARLY_CANCEL_TTL_MS = 30000;
+/** Headers that must not follow a redirect to another origin (curl does the same). */
+const CROSS_ORIGIN_SENSITIVE_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
+/** Headers describing a body that a 301/302/303 redirect drops. */
+const BODY_HEADERS = new Set(["content-type", "content-length", "transfer-encoding", "content-encoding"]);
+
+/**
+ * One controller per in-flight request id so `cancel` can abort it at any
+ * point: while connecting, while streaming the body, or between redirect hops.
+ */
 const activeRequests = new Map();
+/** Request ids cancelled before `send` registered them (renderer races). */
+const earlyCancels = new Map();
+
+function rememberEarlyCancel(requestId) {
+  const now = Date.now();
+  for (const [id, at] of earlyCancels) {
+    if (now - at > EARLY_CANCEL_TTL_MS) earlyCancels.delete(id);
+  }
+  earlyCancels.set(requestId, now);
+}
+
+function consumeEarlyCancel(requestId) {
+  const at = earlyCancels.get(requestId);
+  if (at === undefined) return false;
+  earlyCancels.delete(requestId);
+  return Date.now() - at <= EARLY_CANCEL_TTL_MS;
+}
+
+function cancelledError() {
+  return Object.assign(new Error("Request cancelled"), { code: "ABORT_ERR" });
+}
 
 function clampTimeout(value) {
   const numeric = Number(value);
@@ -109,6 +142,68 @@ function decodeBody(buffer, encoding) {
   return buffer;
 }
 
+function createDecoder(encoding) {
+  const normalized = String(encoding || "").toLowerCase().trim();
+  if (normalized === "gzip" || normalized === "x-gzip") {
+    return zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH });
+  }
+  if (normalized === "deflate") {
+    // Some servers send raw deflate without the zlib wrapper; unzip detects both.
+    return zlib.createUnzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH });
+  }
+  if (normalized === "br") {
+    return zlib.createBrotliDecompress({ finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH });
+  }
+  if (normalized === "zstd" && typeof zlib.createZstdDecompress === "function") {
+    return zlib.createZstdDecompress();
+  }
+  return null;
+}
+
+/**
+ * Streams `buffer` through the content decoder off the main thread pool and
+ * stops at `limit` decoded bytes. A body truncated on the wire still decodes
+ * as far as it goes. Falls back to the raw bytes when nothing decodes.
+ */
+function decodeBodyCapped(buffer, encoding, limit = MAX_DECODED_BODY_BYTES) {
+  const decoder = buffer.length > 0 ? createDecoder(encoding) : null;
+  if (!decoder) return Promise.resolve({ buffer, truncated: false, decoded: false });
+  return new Promise((resolve) => {
+    const chunks = [];
+    let total = 0;
+    let truncated = false;
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (!ok && total === 0) {
+        resolve({ buffer, truncated: false, decoded: false });
+        return;
+      }
+      // A decode error after some output means the tail is missing.
+      resolve({ buffer: Buffer.concat(chunks, total), truncated: truncated || !ok, decoded: true });
+    };
+    decoder.on("data", (chunk) => {
+      if (settled) return;
+      const remaining = limit - total;
+      if (chunk.length >= remaining) {
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        total += Math.max(0, remaining);
+        truncated = true;
+        finish(true);
+        decoder.destroy();
+        return;
+      }
+      chunks.push(chunk);
+      total += chunk.length;
+    });
+    decoder.on("end", () => finish(true));
+    decoder.on("error", () => finish(false));
+    decoder.on("close", () => finish(true));
+    decoder.end(buffer);
+  });
+}
+
 function classifyBody(contentType, buffer) {
   const type = String(contentType || "").toLowerCase();
   const looksBinary = buffer.includes(0);
@@ -145,105 +240,174 @@ function shapeResponse({ status, statusText, httpVersion, headers, buffer, trunc
   return response;
 }
 
-function sendOnce(wire, redirectHistory, deadline) {
+function hasHeader(headers, name) {
+  const target = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === target);
+}
+
+function originOf(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Headers for the next redirect hop: body headers go when the body is
+ * dropped, credentials go when the redirect leaves the original origin
+ * (same rule curl applies without --location-trusted).
+ */
+function headersForRedirect(headers, { dropsBody, crossOrigin }) {
+  return headers.filter(({ key }) => {
+    const lower = key.toLowerCase();
+    if (dropsBody && BODY_HEADERS.has(lower)) return false;
+    if (crossOrigin && (CROSS_ORIGIN_SENSITIVE_HEADERS.has(lower) || lower === "host")) return false;
+    return true;
+  });
+}
+
+function sendOnce(wire, redirectHistory, deadline, controller, startedAt) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let hardTimer = null;
+    let request = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (hardTimer) clearTimeout(hardTimer);
+      if (controller.request === request) controller.request = null;
+      fn(value);
+    };
+    const fail = (error) => settle(reject, error);
+    const succeed = (value) => settle(resolve, value);
+
+    if (controller.cancelled) {
+      fail(cancelledError());
+      return;
+    }
+
     let target;
     try {
       target = new URL(wire.url);
     } catch (error) {
-      reject(Object.assign(error, { code: "ERR_INVALID_URL" }));
+      fail(Object.assign(error, { code: "ERR_INVALID_URL" }));
       return;
     }
     if (target.protocol !== "http:" && target.protocol !== "https:") {
-      reject(Object.assign(new Error(`Unsupported protocol: ${target.protocol}`), { code: "ERR_INVALID_URL" }));
+      fail(Object.assign(new Error(`Unsupported protocol: ${target.protocol}`), { code: "ERR_INVALID_URL" }));
+      return;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      fail(Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }));
       return;
     }
 
     const isHttps = target.protocol === "https:";
     const headers = headersToNode(wire.headers);
-    const hasAcceptEncoding = Object.keys(headers).some((name) => name.toLowerCase() === "accept-encoding");
-    if (!hasAcceptEncoding) headers["Accept-Encoding"] = "gzip, deflate, br";
+    if (!hasHeader(headers, "accept-encoding")) headers["Accept-Encoding"] = "gzip, deflate, br";
+    const sendsBody = wire.method !== "GET" && wire.method !== "HEAD" && typeof wire.bodyText === "string";
+    const body = sendsBody ? Buffer.from(wire.bodyText, "utf8") : null;
+    // An explicit length (what curl sends) instead of chunked transfer
+    // encoding, which a number of servers and proxies reject.
+    if (body && !hasHeader(headers, "content-length") && !hasHeader(headers, "transfer-encoding")) {
+      headers["Content-Length"] = String(body.length);
+    }
 
     const options = {
       protocol: target.protocol,
-      hostname: target.hostname,
+      hostname: target.hostname.replace(/^\[|\]$/g, ""),
       port: target.port ? Number(target.port) : isHttps ? 443 : 80,
       path: `${target.pathname}${target.search}`,
       method: wire.method,
       headers,
-      timeout: clampTimeout(wire.timeoutMs),
     };
     if (isHttps && wire.verifyTls === false) options.rejectUnauthorized = false;
 
-    const started = Date.now();
-    const request = (isHttps ? https : http).request(options, (response) => {
-      const headerList = rawHeadersToList(response.rawHeaders);
-      const status = response.statusCode || 0;
+    try {
+      request = (isHttps ? https : http).request(options, (response) => {
+        const headerList = rawHeadersToList(response.rawHeaders);
+        const status = response.statusCode || 0;
+        // Late socket errors must never reach an unhandled 'error' event.
+        response.on("error", fail);
 
-      if (REDIRECT_STATUSES.has(status) && wire.followRedirects !== false) {
-        const location = headerValue(headerList, "location");
-        if (location) {
-          response.resume();
-          resolve({ redirect: { status, location, headers: headerList, httpVersion: response.httpVersion } });
-          return;
+        if (REDIRECT_STATUSES.has(status) && wire.followRedirects !== false) {
+          const location = headerValue(headerList, "location");
+          if (location) {
+            succeed({ redirect: { status, location, headers: headerList, httpVersion: response.httpVersion } });
+            response.resume();
+            return;
+          }
         }
-      }
 
-      const chunks = [];
-      let total = 0;
-      let truncated = false;
-      response.on("data", (chunk) => {
-        if (total >= MAX_BODY_BYTES) {
-          truncated = true;
-          return;
-        }
-        const remaining = MAX_BODY_BYTES - total;
-        if (chunk.length > remaining) {
-          chunks.push(chunk.subarray(0, remaining));
-          total = MAX_BODY_BYTES;
-          truncated = true;
-        } else {
+        const chunks = [];
+        let total = 0;
+        let truncated = false;
+        let finished = false;
+        const finishBody = () => {
+          if (finished) return;
+          finished = true;
+          // The bytes are in; decoding must not race the network deadline.
+          if (hardTimer) {
+            clearTimeout(hardTimer);
+            hardTimer = null;
+          }
+          const raw = Buffer.concat(chunks, total);
+          decodeBodyCapped(raw, headerValue(headerList, "content-encoding"))
+            .then((decoded) => {
+              succeed({
+                response: shapeResponse({
+                  status,
+                  statusText: response.statusMessage,
+                  httpVersion: response.httpVersion,
+                  headers: headerList,
+                  buffer: decoded.buffer,
+                  truncated: truncated || decoded.truncated,
+                  durationMs: Date.now() - startedAt,
+                  redirects: redirectHistory,
+                }),
+              });
+            })
+            .catch(fail);
+        };
+        response.on("data", (chunk) => {
+          if (finished) return;
+          const remaining = MAX_BODY_BYTES - total;
+          if (chunk.length >= remaining) {
+            if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+            total = MAX_BODY_BYTES;
+            truncated = true;
+            finishBody();
+            // Stop downloading: the rest would only be thrown away.
+            response.destroy();
+            request.destroy();
+            return;
+          }
           chunks.push(chunk);
           total += chunk.length;
-        }
+        });
+        response.on("end", finishBody);
+        response.on("close", () => {
+          if (!finished) {
+            fail(Object.assign(new Error("Connection closed before the response finished"), { code: "ECONNRESET" }));
+          }
+        });
       });
-      response.on("error", reject);
-      response.on("end", () => {
-        const raw = Buffer.concat(chunks, total);
-        const decoded = truncated ? raw : decodeBody(raw, headerValue(headerList, "content-encoding"));
-        try {
-          resolve({
-            response: shapeResponse({
-              status,
-              statusText: response.statusMessage,
-              httpVersion: response.httpVersion,
-              headers: headerList,
-              buffer: decoded,
-              truncated: truncated || decoded.length >= MAX_BODY_BYTES,
-              durationMs: Date.now() - started,
-              redirects: redirectHistory,
-            }),
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-
-    if (wire.method !== "GET" && wire.method !== "HEAD" && typeof wire.bodyText === "string") {
-      request.write(wire.bodyText);
+    } catch (error) {
+      fail(error);
+      return;
     }
 
-    const timeoutMs = Math.max(1, deadline - Date.now());
-    request.setTimeout(Math.min(timeoutMs, clampTimeout(wire.timeoutMs)), () => {
+    hardTimer = setTimeout(() => {
       request.destroy(Object.assign(new Error("Request timed out"), { code: "ETIMEDOUT" }));
-    });
-    request.on("error", reject);
-    activeRequests.set(wire.id, request);
-    request.on("close", () => {
-      if (activeRequests.get(wire.id) === request) activeRequests.delete(wire.id);
-    });
-    request.end();
+    }, remainingMs);
+    request.on("error", fail);
+    controller.request = request;
+    if (body) request.end(body);
+    else request.end();
   });
 }
 
@@ -257,11 +421,14 @@ async function send({ wire }) {
   const deadline = started + clampTimeout(wire.timeoutMs);
   const redirects = [];
   const maxRedirects = clampRedirects(wire.maxRedirects);
+  const controller = { id: requestId, cancelled: consumeEarlyCancel(requestId), request: null };
+  activeRequests.set(requestId, controller);
   let current = { ...payload };
 
   try {
     for (let hop = 0; hop <= maxRedirects; hop += 1) {
-      const outcome = await sendOnce(current, redirects.slice(), deadline);
+      if (controller.cancelled) throw cancelledError();
+      const outcome = await sendOnce(current, redirects.slice(), deadline, controller, started);
       if (!outcome.redirect) {
         return { ok: true, response: outcome.response };
       }
@@ -284,10 +451,12 @@ async function send({ wire }) {
         return { ok: false, error: normalizeError(error, "Invalid redirect location") };
       }
       const dropsBody = status === 303 || ((status === 301 || status === 302) && current.method === "POST");
+      const crossOrigin = originOf(nextUrl) !== originOf(current.url);
       current = {
         ...current,
         url: nextUrl,
-        method: dropsBody ? "GET" : current.method,
+        method: dropsBody && current.method !== "HEAD" ? "GET" : current.method,
+        headers: headersForRedirect(current.headers, { dropsBody, crossOrigin }),
         ...(dropsBody ? { bodyText: undefined } : {}),
       };
     }
@@ -296,18 +465,26 @@ async function send({ wire }) {
       error: { code: "too-many-redirects", message: `Exceeded ${maxRedirects} redirects` },
     };
   } catch (error) {
+    if (controller.cancelled) {
+      return { ok: false, error: { code: "cancelled", message: "Request cancelled" } };
+    }
     return { ok: false, error: normalizeError(error) };
   } finally {
-    activeRequests.delete(requestId);
+    if (activeRequests.get(requestId) === controller) activeRequests.delete(requestId);
   }
 }
 
 function cancel({ requestId }) {
-  const request = activeRequests.get(requestId);
-  if (!request) return { ok: true, cancelled: false };
-  activeRequests.delete(requestId);
+  if (typeof requestId !== "string" || !requestId) return { ok: true, cancelled: false };
+  const controller = activeRequests.get(requestId);
+  if (!controller) {
+    // The renderer can cancel before the send IPC reached us.
+    rememberEarlyCancel(requestId);
+    return { ok: true, cancelled: false };
+  }
+  controller.cancelled = true;
   try {
-    request.destroy(Object.assign(new Error("Request cancelled"), { code: "ABORT_ERR" }));
+    controller.request?.destroy(cancelledError());
   } catch {
     // ignore
   }
@@ -334,7 +511,10 @@ module.exports = {
     headersToNode,
     rawHeadersToList,
     decodeBody,
+    decodeBodyCapped,
     classifyBody,
+    headersForRedirect,
     activeRequests,
+    earlyCancels,
   },
 };

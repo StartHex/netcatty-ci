@@ -74,9 +74,13 @@ export const STORAGE_KEY_HTTP_REQUESTS = 'netcatty_http_requests_v1';
 /** Curl tool: every known collection folder path (names are not secret, stored in clear). */
 export const STORAGE_KEY_CURL_FOLDERS = 'netcatty_curl_folders_v1';
 export const STORAGE_KEY_HTTP_TABS = 'netcatty_http_tabs_v1';
+/** Note ids opened as top tabs. */
+export const STORAGE_KEY_NOTE_TABS = 'netcatty_note_tabs_v1';
 export const STORAGE_KEY_HTTP_HISTORY = 'netcatty_http_history_v1';
 /** Curl tool, device-local: collapsed folder paths in the collection tree. */
 export const STORAGE_KEY_CURL_FOLDER_UI = 'netcatty_curl_folder_ui_v1';
+/** Curl tool, device-local: where the response pane sits ('bottom' | 'right'). */
+export const STORAGE_KEY_CURL_RESPONSE_LAYOUT = 'netcatty_curl_response_layout_v1';
 /** User-registered JDBC driver jars. */
 export const STORAGE_KEY_JDBC_DRIVERS = 'netcatty_jdbc_drivers_v1';
 export const STORAGE_KEY_VAULT_HOSTS_VIEW_MODE = 'netcatty_vault_hosts_view_mode_v1';
@@ -216,6 +220,7 @@ export const STORAGE_KEY_HTTP_NETWORK_PROXY = 'netcatty_http_network_proxy_v1';
 export const STORAGE_KEY_GLOBAL_DEFAULT_PROXY_PROFILE = 'netcatty_global_default_proxy_profile_v1';
 export const STORAGE_KEY_GLOBAL_HOTKEY_ENABLED = 'netcatty_global_hotkey_enabled_v1';
 export const STORAGE_KEY_WINDOW_OPACITY = 'netcatty_window_opacity_v1';
+export const STORAGE_KEY_WINDOW_BACKGROUND_BLUR = 'netcatty_window_background_blur_v1';
 export const STORAGE_KEY_APP_ICON_VARIANT = 'netcatty_app_icon_variant_v1';
 // Custom Terminal Themes
 export const STORAGE_KEY_CUSTOM_THEMES = 'netcatty_custom_themes_v1';
@@ -233,7 +238,12 @@ export const STORAGE_KEY_AI_COMMAND_BLOCKLIST = 'netcatty_ai_command_blocklist_v
 export const STORAGE_KEY_AI_COMMAND_TIMEOUT = 'netcatty_ai_command_timeout_v1';
 export const STORAGE_KEY_AI_RESPONSE_IDLE_TIMEOUT = 'netcatty_ai_response_idle_timeout_v1';
 export const STORAGE_KEY_AI_MAX_ITERATIONS = 'netcatty_ai_max_iterations_v1';
+export const STORAGE_KEY_AI_SESSION_MESSAGE_CAP = 'netcatty_ai_session_message_cap_v1';
 export const STORAGE_KEY_AI_SESSIONS = 'netcatty_ai_sessions_v1';
+/** Byte-budget overflow JSON; further chunks use suffixes _2, _3, etc. */
+export const STORAGE_KEY_AI_SESSIONS_OVERFLOW = 'netcatty_ai_sessions_overflow_v1';
+/** IDs intentionally retained only in the disk backup after aggregate quota exhaustion. */
+export const STORAGE_KEY_AI_SESSIONS_DISK_OVERFLOW = 'netcatty_ai_sessions_disk_overflow_v1';
 /** Opt-in flag: include AI chat sessions in cloud sync payloads. */
 export const STORAGE_KEY_CLOUD_SYNC_AI_SESSIONS = 'netcatty_cloud_sync_ai_sessions_v1';
 export const STORAGE_KEY_AI_ACTIVE_SESSION_MAP = 'netcatty_ai_active_session_map_v1';
@@ -254,6 +264,10 @@ export const STORAGE_KEY_AI_EXTERNAL_MCP_MODE = 'netcatty_ai_external_mcp_mode_v
 export const STORAGE_KEY_AI_EXTERNAL_MCP_IDLE_TIMEOUT_MINUTES = 'netcatty_ai_external_mcp_idle_timeout_minutes_v1';
 /** External MCP: whether host_open should surface/focus the main window (default true). */
 export const STORAGE_KEY_AI_EXTERNAL_MCP_FOCUS_ON_HOST_OPEN = 'netcatty_ai_external_mcp_focus_on_host_open_v1';
+/** Let MCP clients read and organize Vault → Notes. Off unless the user opts in. */
+export const STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS = 'netcatty_ai_external_mcp_notes_access_v1';
+/** Hide passwords / tokens in note text returned to MCP clients. On by default. */
+export const STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS = 'netcatty_ai_external_mcp_notes_mask_secrets_v1';
 /** Idle timeout for terminal sessions opened by an AI through host_open. */
 export const STORAGE_KEY_AI_SESSION_IDLE_TIMEOUT_MINUTES = 'netcatty_ai_session_idle_timeout_minutes_v1';
 /** External MCP: whether host_open sessions stay hidden from the tab bar (default false). */

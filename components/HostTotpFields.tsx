@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import jsQR from "jsqr";
 import { RE2JS } from "re2js";
 import type { Host, HostTotpConfig, OtpAuthenticator } from "../domain/models";
 import { materializeHostTotp } from "../domain/otpAuthenticator";
@@ -67,6 +66,9 @@ function errorKey(error: string | undefined): string {
 }
 
 async function decodeQrFile(file: File): Promise<string> {
+  // Loaded on demand: the decoder is only needed when importing a QR image,
+  // but the host editor (and with it this module) is part of the startup bundle.
+  const { default: jsQR } = await import("jsqr");
   const bitmap = await createImageBitmap(file);
   try {
     const canvas = document.createElement("canvas");

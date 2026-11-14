@@ -68,6 +68,12 @@ module.exports = {
         // Renderer and Mosh's main-process bootstrap share the same
         // fail-closed prompt classifier at runtime.
         'domain/terminalPromptSecurity.shared.cjs',
+        'domain/pluginRuntimePolicy.cjs',
+        'domain/pluginGitHubRepository.cjs',
+        'domain/pluginPermissionDescriptions.cjs',
+        'domain/pluginThemePack.cjs',
+        'domain/pluginRemoteTreePolicy.cjs',
+        'domain/pluginViewStylePolicy.cjs',
         // Main-process SSH, SFTP, and port-forward bridges share this matcher.
         // TypeScript under domain/ is excluded below, so the .cjs must be listed.
         'domain/systemManager/containerRuntime.shared.cjs',
@@ -78,6 +84,7 @@ module.exports = {
         // is excluded below, so the shared TOTP runtime must be listed.
         'domain/totp.shared.cjs',
         'domain/totpPrompt.shared.cjs',
+        'domain/sshPublicKey.shared.cjs',
         'lib/**/*.cjs',
         'lib/**/*.json',
         'skills/**/*',
@@ -206,6 +213,9 @@ module.exports = {
         'node_modules/@netcatty/plugin-contract/**/*',
         'node_modules/@netcatty/plugin-sdk/**/*',
         'electron/plugins/runtime/**/*',
+        // The elevated terminal helper runs as a plain node script from a
+        // real path and loads node-pty from beside it.
+        'electron/elevatedPty/**/*',
         'node_modules/ajv/**/*',
         'node_modules/ajv-formats/**/*',
         'node_modules/fast-deep-equal/**/*',
@@ -347,8 +357,9 @@ module.exports = {
     publish: [
         {
             provider: 'github',
-            owner: 'binaricat',
-            repo: 'Netcatty',
+            // Fork: never let a packaged build resolve upstream's update feed.
+            owner: 'StartHex',
+            repo: 'netcatty-ci',
             releaseType: 'release'
         }
     ]

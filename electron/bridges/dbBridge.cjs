@@ -15,6 +15,7 @@ const { resolveJava } = require("./javaRuntime.cjs");
  * passes them per call. Nothing is persisted here.
  */
 
+const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
 const path = require("path");
@@ -52,6 +53,27 @@ function mysqlTypeName(code) {
 
 const CTE_STATEMENT_VERBS = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]);
 const SQL_LEADING_NOISE = /^\s*(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|\s)*/;
+
+/**
+ * Transaction boundary a hand-typed statement creates, so the workbench badge
+ * follows `BEGIN` / `COMMIT` typed in the editor, not only the toolbar buttons.
+ * Oracle `BEGIN` opens a PL/SQL block (its transactions start implicitly),
+ * SQL Server manages its own, and generic JDBC dialects are unknown.
+ */
+function transactionEffectOf(kind, sql) {
+  if (kind === "sqlserver" || kind === "jdbc") return null;
+  const head = String(sql || "").replace(SQL_LEADING_NOISE, "").replace(/;\s*$/, "").trim();
+  if (!head) return null;
+  if (/^(rollback|commit)\s+(to|prepared)\b/i.test(head)) return null;
+  if (/^(rollback|abort)\b/i.test(head)) return kind === "oracle" || kind === "postgresql" || !/^abort/i.test(head) ? "rollback" : null;
+  if (/^commit\b/i.test(head)) return "commit";
+  if (/^end(\s+(work|transaction))?$/i.test(head)) return kind === "postgresql" || kind === "sqlite" ? "commit" : null;
+  if (kind === "oracle") return null;
+  if (/^start\s+transaction\b/i.test(head)) return kind === "sqlite" ? null : "begin";
+  // Top-level BEGIN starts a transaction everywhere except Oracle (handled above).
+  if (/^begin\b/i.test(head)) return "begin";
+  return null;
+}
 
 /**
  * Best-effort command label for a statement that returned no result set, so the
@@ -142,10 +164,108 @@ function buildSelectResult(rowObjects, fields, maxRows, startedAt) {
 
 const DEFAULT_MAX_ROWS = 1000;
 const HARD_MAX_ROWS = 5000;
+/**
+ * Tables listed in the schema panel. This is not a result set, so the row
+ * cap above does not apply: a schema with more tables than that used to be
+ * cut off, and the missing tables could not be found by the panel's search.
+ */
+const SCHEMA_TABLE_LIMIT = 100000;
 const DEFAULT_TIMEOUT_MS = 30000;
+const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 15000;
+/** Upper bound for a test / connect round-trip (connect + version query). */
+const CONNECT_ROUNDTRIP_TIMEOUT_MS = 45000;
+/** Schema tree / structure lookups. */
+const METADATA_TIMEOUT_MS = 60000;
+/** BEGIN / COMMIT / ROLLBACK; can queue behind a running statement. */
+const CONTROL_TIMEOUT_MS = 60000;
+/** How long a cancelled statement may take to wind down before the session is reset. */
+const CANCEL_SETTLE_MS = 5000;
+/** A graceful close that takes longer than this is forced. */
+const CLOSE_TIMEOUT_MS = 3000;
+/** JDBC gets its own driver-side statement timeout first; the bridge waits a bit longer. */
+const JDBC_TIMEOUT_GRACE_MS = 3000;
 
 const sessions = new Map();
+
+/** Resolves true when `promise` settles within `ms`, false otherwise (never rejects). */
+function settleWithin(promise, ms) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).then(() => true, () => true),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** Resolves true only when `promise` fulfils within `ms` (never rejects). */
+function resolvesWithin(promise, ms) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).then(() => true, () => false),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** Graceful close with a deadline, then the driver's hard close. Never throws. */
+async function closeSessionSafely(session) {
+  if (!session) return;
+  let closing;
+  try {
+    closing = Promise.resolve(session.close());
+  } catch {
+    closing = Promise.resolve();
+  }
+  const graceful = await settleWithin(closing, CLOSE_TIMEOUT_MS);
+  if (!graceful) {
+    try {
+      await session.forceClose?.();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Everything that decides which server/session a target dials. A cached
+ * session whose fingerprint no longer matches (edited password, host,
+ * charset, ...) is replaced instead of silently reused. Hashed so the
+ * password is not kept around as another plain string.
+ */
+function connectionFingerprint(target) {
+  const relevant = [
+    target.kind,
+    target.host,
+    target.port,
+    target.database,
+    target.username,
+    target.password,
+    target.sslMode,
+    target.sqlitePath,
+    target.inMemory,
+    target.jdbcUrl,
+    target.jdbcDriverClass,
+    target.jdbcDriverPaths,
+    target.javaPath,
+    target.jdbcProperties,
+    target.clientEncoding,
+    target.initSql,
+  ];
+  return crypto.createHash("sha256").update(JSON.stringify(relevant)).digest("hex");
+}
+
+function errorWithCode(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers (exported for tests)
@@ -160,7 +280,9 @@ function clampMaxRows(value) {
 function clampTimeout(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_TIMEOUT_MS;
-  return Math.min(Math.trunc(n), 10 * 60 * 1000);
+  // Counting or scanning a table with hundreds of millions of rows takes
+  // far longer than interactive queries; the tab chooses how long to wait.
+  return Math.min(Math.trunc(n), MAX_TIMEOUT_MS);
 }
 
 function toCellValue(value) {
@@ -264,27 +386,47 @@ function createPgSession(target) {
   const { Client } = require("pg");
   let client = null;
   let connecting = null;
+  // Bumped for every physical connection, so the bridge can tell when an open
+  // transaction silently vanished with a dropped socket.
+  let generation = 0;
+
+  const clientConfig = (overrides = {}) => ({
+    host: target.host,
+    port: target.port,
+    database: target.database,
+    user: target.username,
+    password: target.password,
+    ssl: pgSslOptions(target.sslMode),
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+    keepAlive: true,
+    application_name: "Netcatty",
+    ...overrides,
+  });
+
+  const destroyInstance = (instance) => {
+    try {
+      instance?.connection?.stream?.destroy();
+    } catch {
+      /* ignore */
+    }
+  };
 
   async function ensure() {
     if (client) return client;
     if (connecting) return connecting;
     connecting = (async () => {
-      const instance = new Client({
-        host: target.host,
-        port: target.port,
-        database: target.database,
-        user: target.username,
-        password: target.password,
-        ssl: pgSslOptions(target.sslMode),
-        connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
-        keepAlive: true,
-        application_name: "Netcatty",
-      });
+      const instance = new Client(clientConfig());
+      // Only forget the client that actually failed: an old instance erroring
+      // late (after cancel or reconnect) must not orphan the new connection.
       instance.on("error", () => {
-        client = null;
+        if (client === instance) client = null;
+      });
+      instance.on("end", () => {
+        if (client === instance) client = null;
       });
       await instance.connect();
       client = instance;
+      generation += 1;
       return instance;
     })();
     try {
@@ -297,6 +439,7 @@ function createPgSession(target) {
   return {
     kind: "postgresql",
     ensure,
+    generation: () => generation,
     async serverVersion() {
       const instance = await ensure();
       const result = await instance.query("select version() as version");
@@ -366,13 +509,41 @@ function createPgSession(target) {
         action === "begin" ? "BEGIN" : action === "commit" ? "COMMIT" : "ROLLBACK";
       await instance.query(statement);
     },
-    cancel() {
-      try {
-        client?.connection?.stream?.destroy();
-      } catch {
-        /* ignore */
+    /**
+     * Cancels the running statement through a side connection
+     * (pg_cancel_backend), which keeps the session — and an open transaction —
+     * alive. Dropping the socket is only the fallback.
+     */
+    async cancel() {
+      const instance = client;
+      if (!instance) return;
+      const pid = instance.processID;
+      if (pid) {
+        const canceller = new Client(clientConfig({
+          connectionTimeoutMillis: 5000,
+          keepAlive: false,
+          application_name: "Netcatty (cancel)",
+        }));
+        canceller.on("error", () => {});
+        try {
+          const cancelled = await resolvesWithin(
+            canceller.connect().then(() => canceller.query("select pg_cancel_backend($1)", [pid])),
+            5000,
+          );
+          if (cancelled) return;
+        } catch {
+          /* fall back below */
+        } finally {
+          canceller.end().catch(() => destroyInstance(canceller));
+        }
       }
+      if (client === instance) client = null;
+      destroyInstance(instance);
+    },
+    forceClose() {
+      const instance = client;
       client = null;
+      destroyInstance(instance);
     },
     async close() {
       const instance = client;
@@ -381,11 +552,7 @@ function createPgSession(target) {
       try {
         await instance.end();
       } catch {
-        try {
-          instance.connection?.stream?.destroy();
-        } catch {
-          /* ignore */
-        }
+        destroyInstance(instance);
       }
     },
   };
@@ -395,28 +562,53 @@ function createMysqlSession(target) {
   const mysql = require("mysql2/promise");
   let connection = null;
   let connecting = null;
+  let generation = 0;
+
+  const connectionConfig = (overrides = {}) => ({
+    host: target.host,
+    port: target.port,
+    user: target.username,
+    password: target.password,
+    database: target.database,
+    ssl: mysqlSslOptions(target.sslMode),
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    multipleStatements: true,
+    dateStrings: false,
+    supportBigNumbers: true,
+    bigNumberStrings: false,
+    // A client charset on the connection tells both sides how to decode
+    // strings (gbk / gb18030 / big5 / latin1 / utf8mb4, ...).
+    ...(target.clientEncoding ? { charset: target.clientEncoding } : {}),
+    ...overrides,
+  });
+
+  /** mysql2 keeps a closed connection object around; detect it before reuse. */
+  const isDead = (instance) => {
+    const inner = instance?.connection;
+    return Boolean(inner && (inner._fatalError || inner._closing || inner.stream?.destroyed));
+  };
+
+  const destroyInstance = (instance) => {
+    try {
+      instance?.destroy?.();
+    } catch {
+      /* ignore */
+    }
+  };
 
   async function ensure() {
+    if (connection && isDead(connection)) connection = null;
     if (connection) return connection;
     if (connecting) return connecting;
     connecting = (async () => {
-      const instance = await mysql.createConnection({
-        host: target.host,
-        port: target.port,
-        user: target.username,
-        password: target.password,
-        database: target.database,
-        ssl: mysqlSslOptions(target.sslMode),
-        connectTimeout: CONNECT_TIMEOUT_MS,
-        multipleStatements: true,
-        dateStrings: false,
-        supportBigNumbers: true,
-        bigNumberStrings: false,
-        // A client charset on the connection tells both sides how to decode
-        // strings (gbk / gb18030 / big5 / latin1 / utf8mb4, ...).
-        ...(target.clientEncoding ? { charset: target.clientEncoding } : {}),
+      const instance = await mysql.createConnection(connectionConfig());
+      // Without a listener, an idle disconnect (wait_timeout, server restart)
+      // is an unhandled 'error' event in the main process.
+      instance.on("error", () => {
+        if (connection === instance) connection = null;
       });
       connection = instance;
+      generation += 1;
       return instance;
     })();
     try {
@@ -429,6 +621,7 @@ function createMysqlSession(target) {
   return {
     kind: "mysql",
     ensure,
+    generation: () => generation,
     async serverVersion() {
       const instance = await ensure();
       const [rows] = await instance.query("select version() as version");
@@ -474,19 +667,53 @@ function createMysqlSession(target) {
         primaryKey: Number(row.is_pk) === 1,
       }));
     },
-    cancel() {
-      try {
-        connection?.destroy?.();
-      } catch {
-        /* ignore */
+    /**
+     * KILL QUERY from a side connection stops the statement but keeps the
+     * session and its transaction; dropping the socket is the fallback.
+     */
+    async cancel() {
+      const instance = connection;
+      if (!instance) return;
+      const threadId = Number(instance.connection?.threadId ?? instance.threadId);
+      if (Number.isInteger(threadId) && threadId > 0) {
+        let killer = null;
+        let abandoned = false;
+        try {
+          const killed = await resolvesWithin(
+            mysql.createConnection(connectionConfig({ connectTimeout: 5000, multipleStatements: false }))
+              .then((created) => {
+                created.on("error", () => {});
+                if (abandoned) {
+                  // Connected after we gave up: do not leak it.
+                  created.end().catch(() => destroyInstance(created));
+                  return undefined;
+                }
+                killer = created;
+                return killer.query(`KILL QUERY ${threadId}`);
+              }),
+            5000,
+          );
+          if (killed) return;
+        } catch {
+          /* fall back below */
+        } finally {
+          abandoned = true;
+          if (killer) killer.end().catch(() => destroyInstance(killer));
+        }
       }
-      connection = null;
+      if (connection === instance) connection = null;
+      destroyInstance(instance);
     },
     async control(action) {
       const instance = await ensure();
       if (action === "begin") await instance.beginTransaction();
       else if (action === "commit") await instance.commit();
       else await instance.rollback();
+    },
+    forceClose() {
+      const instance = connection;
+      connection = null;
+      destroyInstance(instance);
     },
     async close() {
       const instance = connection;
@@ -495,11 +722,7 @@ function createMysqlSession(target) {
       try {
         await instance.end();
       } catch {
-        try {
-          instance.destroy?.();
-        } catch {
-          /* ignore */
-        }
+        destroyInstance(instance);
       }
     },
   };
@@ -509,6 +732,7 @@ function createOracleSession(target) {
   const oracledb = require("oracledb");
   let connection = null;
   let connecting = null;
+  let generation = 0;
 
   function connectString() {
     const port = target.port || 1521;
@@ -525,8 +749,11 @@ function createOracleSession(target) {
         user: target.username,
         password: target.password,
         connectString: connectString(),
+        // Seconds; an unreachable listener otherwise waits for the OS default.
+        connectTimeout: Math.ceil(CONNECT_TIMEOUT_MS / 1000),
       });
       connection = instance;
+      generation += 1;
       return instance;
     })();
     try {
@@ -539,6 +766,7 @@ function createOracleSession(target) {
   return {
     kind: "oracle",
     ensure,
+    generation: () => generation,
     async serverVersion() {
       const instance = await ensure();
       const result = await instance.execute("select banner from v$version where rownum = 1");
@@ -572,7 +800,7 @@ function createOracleSession(target) {
           "where owner not in ('SYS', 'SYSTEM', 'XDB', 'MDSYS', 'CTXSYS', 'ORDSYS') " +
           "order by owner, table_name",
         [],
-        { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: 5000 },
+        { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: SCHEMA_TABLE_LIMIT },
       );
       return (result.rows || []).map((row) => ({
         schema: String(row[0] || ""),
@@ -618,6 +846,13 @@ function createOracleSession(target) {
         /* ignore */
       }
     },
+    forceClose() {
+      const instance = connection;
+      connection = null;
+      // node-oracledb has no socket handle to destroy; drop the reference and
+      // let a background close finish whenever the server answers.
+      instance?.close?.().catch?.(() => {});
+    },
     async close() {
       const instance = connection;
       connection = null;
@@ -642,9 +877,11 @@ function createSqliteSession(target) {
   const file = target.sqlitePath || ":memory:";
   const db = new DatabaseSync(file);
 
+  let closed = false;
   return {
     kind: "sqlite",
     ensure: async () => db,
+    generation: () => 1,
     async serverVersion() {
       const row = db.prepare("select sqlite_version() as version").get();
       return String(row?.version || "");
@@ -706,7 +943,18 @@ function createSqliteSession(target) {
     cancel() {
       /* synchronous driver: nothing to cancel */
     },
+    forceClose() {
+      if (closed) return;
+      closed = true;
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+    },
     async close() {
+      if (closed) return;
+      closed = true;
       db.close();
     },
   };
@@ -716,11 +964,20 @@ function createJdbcSession(target) {
   const { JdbcSidecar } = require("./jdbcSidecar.cjs");
   const { listJavaCandidates } = require("./javaRuntime.cjs");
   let connecting = null;
+  let generation = 0;
+  let inTransaction = false;
+  let busy = 0;
+  // Bumped by cancel(): a request that dies with the killed sidecar must not
+  // be replayed on a fresh one.
+  let cancelEpoch = 0;
   // A JVM crash used to leave `connecting` resolved, so every later query
   // reported sidecar-exit without ever restarting the sidecar.
+  const onSidecarExit = () => {
+    connecting = null;
+  };
   let sidecar = new JdbcSidecar({
     javaPath: target.javaPath,
-    onExit: () => { connecting = null; },
+    onExit: onSidecarExit,
   });
   const connId = "conn-1";
   // x86_64-only driver libraries cannot load into an arm64 JVM. Remember which
@@ -747,6 +1004,7 @@ function createJdbcSession(target) {
       user: target.username,
       password: target.password,
       driverClass: target.jdbcDriverClass,
+      loginTimeoutSec: Math.ceil(CONNECT_TIMEOUT_MS / 1000),
       jars: Array.isArray(target.jdbcDriverPaths)
         ? target.jdbcDriverPaths.join(require("node:path").delimiter)
         : target.jdbcDriverPaths,
@@ -774,7 +1032,7 @@ function createJdbcSession(target) {
       if (currentPath) rejectedJava.add(currentPath);
       for (const candidate of listJavaCandidates({})) {
         if (rejectedJava.has(candidate)) continue;
-        const next = new JdbcSidecar({ javaPath: candidate });
+        const next = new JdbcSidecar({ javaPath: candidate, onExit: onSidecarExit });
         try {
           const fields = await connectOn(next);
           const previous = sidecar;
@@ -798,44 +1056,71 @@ function createJdbcSession(target) {
     }
   };
 
-  const requestWithRestart = async (method, params) => {
-    await ensure();
-    let response = await sidecar.request(method, params);
-    if (!response.ok && response.error?.code === "sidecar-exit") {
-      connecting = null;
-      await ensure();
-      response = await sidecar.request(method, params);
-    }
-    return response;
-  };
-
-  const ensure = async () => {
+  const ensure = () => {
     if (!connecting) {
-      connecting = (async () => connectWithFallback())();
-      connecting = connecting.catch((error) => {
-        connecting = null;
-        throw error;
+      const pending = connectWithFallback().then((fields) => {
+        generation += 1;
+        inTransaction = false;
+        return fields;
+      });
+      connecting = pending;
+      // A failed connect must be retried by the next call, not cached.
+      pending.catch(() => {
+        if (connecting === pending) connecting = null;
       });
     }
     return connecting;
   };
 
+  const requestWithRestart = async (method, params) => {
+    const epoch = cancelEpoch;
+    busy += 1;
+    try {
+      await ensure();
+      let response = await sidecar.request(method, params);
+      if (!response.ok && response.error?.code === "sidecar-exit") {
+        if (epoch !== cancelEpoch) {
+          return { ok: false, error: { message: "Query cancelled", code: "query-cancelled" } };
+        }
+        // Replaying inside a lost transaction would run it in auto-commit
+        // mode on a fresh connection; report the crash instead.
+        if (inTransaction) return response;
+        connecting = null;
+        await ensure();
+        response = await sidecar.request(method, params);
+      }
+      return response;
+    } finally {
+      busy -= 1;
+    }
+  };
+
+  const fail = (response, fallback) => {
+    const error = new Error(response.error?.message || fallback);
+    error.code = response.error?.code || "jdbc-error";
+    error.sqlState = response.error?.sqlState;
+    return error;
+  };
+
   return {
+    kind: "jdbc",
+    ensure,
+    generation: () => generation,
     async serverVersion() {
       const fields = await ensure();
       const product = fields.product || "JDBC";
       const version = fields.version || "";
       return version ? `${product} ${version}` : product;
     },
-    async query(sql, { maxRows }) {
-      const response = await requestWithRestart("QUERY", { connId, sql, maxRows });
-      if (!response.ok) {
-        const error = new Error(response.error?.message || "JDBC query failed");
-        error.code = response.error?.code || "jdbc-error";
-        error.sqlState = response.error?.sqlState;
-        throw error;
-      }
+    async query(sql, { maxRows, timeoutMs }) {
       const started = Date.now();
+      const response = await requestWithRestart("QUERY", {
+        connId,
+        sql,
+        maxRows,
+        ...(timeoutMs ? { timeoutSec: Math.max(1, Math.ceil(timeoutMs / 1000)) } : {}),
+      });
+      if (!response.ok) throw fail(response, "JDBC query failed");
       // Statements without a result set (INSERT/UPDATE/DDL) come back as a
       // `fields.update` tail carrying the driver's update count.
       if (response.fields?.update === "true") {
@@ -864,22 +1149,12 @@ function createJdbcSession(target) {
     },
     async execute(sql) {
       const response = await requestWithRestart("UPDATE", { connId, sql });
-      if (!response.ok) {
-        const error = new Error(response.error?.message || "JDBC statement failed");
-        error.code = response.error?.code || "jdbc-error";
-        error.sqlState = response.error?.sqlState;
-        throw error;
-      }
+      if (!response.ok) throw fail(response, "JDBC statement failed");
       return { rowCount: Number(response.fields?.rows || 0) };
     },
     async tables() {
-      await ensure();
-      const response = await sidecar.request("METATABLES", { connId });
-      if (!response.ok) {
-        const error = new Error(response.error?.message || "JDBC metadata failed");
-        error.code = response.error?.code || "jdbc-error";
-        throw error;
-      }
+      const response = await requestWithRestart("METATABLES", { connId });
+      if (!response.ok) throw fail(response, "JDBC metadata failed");
       return (response.rows || []).map((row) => ({
         schema: row[0] || "",
         name: row[1] || "",
@@ -887,13 +1162,8 @@ function createJdbcSession(target) {
       }));
     },
     async columns(schema, table) {
-      await ensure();
-      const response = await sidecar.request("METACOLUMNS", { connId, schema, table });
-      if (!response.ok) {
-        const error = new Error(response.error?.message || "JDBC metadata failed");
-        error.code = response.error?.code || "jdbc-error";
-        throw error;
-      }
+      const response = await requestWithRestart("METACOLUMNS", { connId, schema, table });
+      if (!response.ok) throw fail(response, "JDBC metadata failed");
       return (response.rows || []).map((row) => ({
         name: row[0] || "",
         type: row[1] || "",
@@ -903,18 +1173,25 @@ function createJdbcSession(target) {
     },
     async control(action) {
       await ensure();
-      const method = action === "begin" ? null : action === "commit" ? "COMMIT" : "ROLLBACK";
-      if (method) {
-        const response = await sidecar.request(method, { connId });
-        if (!response.ok) {
-          const error = new Error(response.error?.message || "JDBC transaction failed");
-          error.code = response.error?.code || "jdbc-error";
-          throw error;
-        }
-      }
+      const method = action === "begin" ? "BEGIN" : action === "commit" ? "COMMIT" : "ROLLBACK";
+      const response = await sidecar.request(method, { connId });
+      if (!response.ok) throw fail(response, "JDBC transaction failed");
+      inTransaction = action === "begin";
     },
+    /**
+     * The sidecar executes one statement at a time on its only thread, so it
+     * cannot read a cancel request while a statement runs. Killing the JVM is
+     * the only way to stop it; the next call starts a fresh sidecar.
+     */
     async cancel() {
-      // The sidecar runs statements serially; cancelling is best effort.
+      if (busy === 0) return;
+      cancelEpoch += 1;
+      connecting = null;
+      sidecar.kill();
+    },
+    forceClose() {
+      connecting = null;
+      sidecar.kill();
     },
     async close() {
       try {
@@ -932,6 +1209,7 @@ function createSqlServerSession(target) {
   const tedious = require("tedious");
   let connection = null;
   let connecting = null;
+  let generation = 0;
 
   function connect() {
     return new Promise((resolve, reject) => {
@@ -961,7 +1239,10 @@ function createSqlServerSession(target) {
         resolve(instance);
       });
       instance.on("error", () => {
-        connection = null;
+        if (connection === instance) connection = null;
+      });
+      instance.on("end", () => {
+        if (connection === instance) connection = null;
       });
       instance.connect();
     });
@@ -972,6 +1253,7 @@ function createSqlServerSession(target) {
     if (connecting) return connecting;
     connecting = connect().then((instance) => {
       connection = instance;
+      generation += 1;
       return instance;
     });
     try {
@@ -1013,6 +1295,7 @@ function createSqlServerSession(target) {
   return {
     kind: "sqlserver",
     ensure,
+    generation: () => generation,
     async serverVersion() {
       const instance = await ensure();
       const result = await exec(instance, "select @@version as version", 1);
@@ -1028,7 +1311,7 @@ function createSqlServerSession(target) {
         instance,
         "select table_schema as [schema], table_name as [name], table_type as [type] " +
           "from information_schema.tables order by table_schema, table_name",
-        HARD_MAX_ROWS,
+        SCHEMA_TABLE_LIMIT,
       );
       return result.rows.map((row) => ({
         schema: String(row[0] || ""),
@@ -1068,7 +1351,22 @@ function createSqlServerSession(target) {
       });
     },
     async cancel() {
-      // tedious has no per-request cancel; closing the session is the escape hatch.
+      // Sends a TDS attention: the running request fails with ECANCEL and the
+      // session stays usable.
+      try {
+        connection?.cancel();
+      } catch {
+        // ignore
+      }
+    },
+    forceClose() {
+      const instance = connection;
+      connection = null;
+      try {
+        instance?.close();
+      } catch {
+        // ignore
+      }
     },
     async close() {
       if (connection) {
@@ -1154,39 +1452,72 @@ function splitSqlStatements(script) {
   return statements;
 }
 
+/**
+ * One serialized session for a connection target. Not registered anywhere:
+ * `getSession` caches entries for the workbench, `handlers.test` uses a
+ * throwaway one so a test never touches (or closes) the live session.
+ */
+function createEntry(target, key = targetKey(target)) {
+  const session = driverFor(target.kind)(target);
+  let chain = Promise.resolve();
+  let closePromise = null;
+  const entry = {
+    key,
+    session,
+    target,
+    fingerprint: connectionFingerprint(target),
+    closed: false,
+    /** Transaction state as the bridge last saw it, tied to a connection generation. */
+    transaction: { open: false, generation: 0 },
+    /** The statement currently on the wire (for cancel). */
+    activeRun: null,
+    run(task) {
+      const next = chain.then(task, task);
+      // Keep the chain alive after failures so later queries still run.
+      chain = next.catch(() => {});
+      return next;
+    },
+    ready: Promise.resolve(),
+    initError: null,
+    close() {
+      if (!closePromise) {
+        entry.closed = true;
+        if (sessions.get(key) === entry) sessions.delete(key);
+        closePromise = closeSessionSafely(session);
+      }
+      return closePromise;
+    },
+  };
+  if (typeof target.initSql === "string" && target.initSql.trim()) {
+    entry.ready = entry
+      .run(async () => {
+        for (const statement of splitSqlStatements(target.initSql)) {
+          // Bounded: every later query on this session waits for init.
+          await runWithDeadline(
+            entry,
+            () => entry.session.query(statement, { maxRows: 1, timeoutMs: DEFAULT_TIMEOUT_MS }),
+            DEFAULT_TIMEOUT_MS,
+          );
+        }
+      })
+      .catch((error) => {
+        entry.initError = normalizeError(error);
+      });
+  }
+  return entry;
+}
+
 function getSession(target) {
   const key = targetKey(target);
   let entry = sessions.get(key);
+  if (entry && entry.fingerprint !== connectionFingerprint(target)) {
+    // Edited host / password / charset / init SQL: the cached session dials
+    // the old settings, so replace it rather than reuse it.
+    void entry.close();
+    entry = undefined;
+  }
   if (!entry) {
-    const session = driverFor(target.kind)(target);
-    let chain = Promise.resolve();
-    entry = {
-      session,
-      target,
-      run(task) {
-        const next = chain.then(task, task);
-        // Keep the chain alive after failures so later queries still run.
-        chain = next.catch(() => {});
-        return next;
-      },
-      ready: Promise.resolve(),
-      initError: null,
-      async close() {
-        await session.close();
-        sessions.delete(key);
-      },
-    };
-    if (typeof target.initSql === "string" && target.initSql.trim()) {
-      entry.ready = entry
-        .run(async () => {
-          for (const statement of splitSqlStatements(target.initSql)) {
-            await session.query(statement, { maxRows: 1 });
-          }
-        })
-        .catch((error) => {
-          entry.initError = normalizeError(error);
-        });
-    }
+    entry = createEntry(target, key);
     sessions.set(key, entry);
   }
   return entry;
@@ -1197,7 +1528,8 @@ function withTimeout(promise, ms, onTimeout) {
   const timeout = new Promise((_resolve, reject) => {
     timer = setTimeout(() => {
       try {
-        onTimeout?.();
+        const pending = onTimeout?.();
+        if (pending && typeof pending.catch === "function") pending.catch(() => {});
       } catch {
         /* ignore */
       }
@@ -1211,24 +1543,80 @@ function withTimeout(promise, ms, onTimeout) {
   });
 }
 
+/**
+ * A physical reconnect (dropped socket, killed sidecar, server restart)
+ * silently ends an open transaction. Running the next statement on the new
+ * connection would auto-commit what the user meant to roll back, so the
+ * bridge refuses once and tells the UI the transaction is gone.
+ */
+async function assertTransactionIntact(entry) {
+  if (!entry.transaction.open) return;
+  await entry.session.ensure?.();
+  const generation = entry.session.generation?.() ?? entry.transaction.generation;
+  if (generation === entry.transaction.generation) return;
+  entry.transaction = { open: false, generation };
+  throw errorWithCode(
+    "The connection was lost and the open transaction was rolled back by the server. Start a new transaction before running more statements.",
+    "transaction-lost",
+  );
+}
+
+/**
+ * Runs `operation` against the entry's session with a deadline. A timeout
+ * first asks the driver to cancel; when the driver does not wind down in
+ * time the session is reset so the next call starts clean.
+ */
+async function runWithDeadline(entry, operation, timeoutMs, { cancelOnTimeout = true } = {}) {
+  const run = { cancelled: false, timedOut: false };
+  entry.activeRun = run;
+  const pending = Promise.resolve().then(operation);
+  try {
+    return await withTimeout(pending, timeoutMs, () => {
+      run.timedOut = true;
+      return cancelOnTimeout ? entry.session.cancel?.() : undefined;
+    });
+  } catch (error) {
+    if (run.timedOut || run.cancelled) {
+      const settled = await settleWithin(pending, CANCEL_SETTLE_MS);
+      if (!settled) await entry.close();
+    }
+    if (run.cancelled) throw errorWithCode("Query cancelled", "query-cancelled");
+    throw error;
+  } finally {
+    if (entry.activeRun === run) entry.activeRun = null;
+  }
+}
+
+function transactionState(entry) {
+  return { transactionOpen: entry.transaction.open };
+}
+
 const handlers = {
   async test(target) {
     const started = Date.now();
     let entry;
     try {
-      entry = getSession(target);
+      // Throwaway session: never the cached one the workbench is using.
+      entry = createEntry(target, `test:${Date.now()}:${Math.random().toString(36).slice(2)}`);
     } catch (error) {
       return failure(error);
     }
     try {
-      await entry.ready;
+      await withTimeout(entry.ready, CONNECT_ROUNDTRIP_TIMEOUT_MS);
       if (entry.initError) throw entry.initError;
-      const serverVersion = await entry.run(() => entry.session.serverVersion());
+      const serverVersion = await entry.run(() =>
+        runWithDeadline(entry, () => entry.session.serverVersion(), CONNECT_ROUNDTRIP_TIMEOUT_MS, {
+          cancelOnTimeout: false,
+        }),
+      );
       return { ok: true, durationMs: Date.now() - started, serverVersion };
     } catch (error) {
+      if (error?.code === "query-timeout") {
+        return failure(errorWithCode(`Connection timed out after ${CONNECT_ROUNDTRIP_TIMEOUT_MS / 1000}s`, "connect-timeout"));
+      }
       return failure(error);
     } finally {
-      await entry.close().catch(() => {});
+      await entry.close();
     }
   },
 
@@ -1241,12 +1629,19 @@ const handlers = {
       return failure(error);
     }
     try {
-      await entry.ready;
+      await withTimeout(entry.ready, CONNECT_ROUNDTRIP_TIMEOUT_MS);
       if (entry.initError) throw entry.initError;
-      const serverVersion = await entry.run(() => entry.session.serverVersion());
+      const serverVersion = await entry.run(() =>
+        runWithDeadline(entry, () => entry.session.serverVersion(), CONNECT_ROUNDTRIP_TIMEOUT_MS, {
+          cancelOnTimeout: false,
+        }),
+      );
       return { ok: true, durationMs: Date.now() - started, serverVersion };
     } catch (error) {
-      await entry.close().catch(() => {});
+      await entry.close();
+      if (error?.code === "query-timeout") {
+        return failure(errorWithCode(`Connection timed out after ${CONNECT_ROUNDTRIP_TIMEOUT_MS / 1000}s`, "connect-timeout"));
+      }
       return failure(error);
     }
   },
@@ -1263,18 +1658,30 @@ const handlers = {
     }
     const limit = clampMaxRows(maxRows);
     const timeout = clampTimeout(timeoutMs);
+    // JDBC drivers enforce their own statement timeout first and keep the session.
+    const deadline = target.kind === "jdbc" ? timeout + JDBC_TIMEOUT_GRACE_MS : timeout;
     try {
       await entry.ready;
       if (entry.initError) throw entry.initError;
-      const result = await entry.run(() =>
-        withTimeout(entry.session.query(sql, { maxRows: limit }), timeout, () => entry.session.cancel()),
-      );
-      return { ok: true, result };
+      const result = await entry.run(async () => {
+        await assertTransactionIntact(entry);
+        const outcome = await runWithDeadline(
+          entry,
+          () => entry.session.query(sql, { maxRows: limit, timeoutMs: timeout }),
+          deadline,
+        );
+        const effect = transactionEffectOf(target.kind, sql);
+        if (effect) {
+          entry.transaction = {
+            open: effect === "begin",
+            generation: entry.session.generation?.() ?? 0,
+          };
+        }
+        return outcome;
+      });
+      return { ok: true, result, ...transactionState(entry) };
     } catch (error) {
-      if (error?.code === "query-timeout") {
-        await entry.close().catch(() => {});
-      }
-      return failure(error);
+      return { ...failure(error), ...transactionState(entry) };
     }
   },
 
@@ -1286,7 +1693,11 @@ const handlers = {
       return failure(error);
     }
     try {
-      const tables = await entry.run(() => entry.session.tables());
+      await entry.ready;
+      if (entry.initError) throw entry.initError;
+      const tables = await entry.run(() =>
+        runWithDeadline(entry, () => entry.session.tables(), METADATA_TIMEOUT_MS),
+      );
       return { ok: true, tables };
     } catch (error) {
       return failure(error);
@@ -1304,7 +1715,11 @@ const handlers = {
       return failure(error);
     }
     try {
-      const columns = await entry.run(() => entry.session.columns(schema, table));
+      await entry.ready;
+      if (entry.initError) throw entry.initError;
+      const columns = await entry.run(() =>
+        runWithDeadline(entry, () => entry.session.columns(schema, table), METADATA_TIMEOUT_MS),
+      );
       return { ok: true, columns };
     } catch (error) {
       return failure(error);
@@ -1322,31 +1737,45 @@ const handlers = {
       return failure(error);
     }
     try {
-      await entry.run(() => entry.session.control(action));
-      return { ok: true, action };
+      await entry.ready;
+      if (entry.initError) throw entry.initError;
+      await entry.run(async () => {
+        if (action !== "begin") await assertTransactionIntact(entry);
+        await runWithDeadline(entry, () => entry.session.control(action), CONTROL_TIMEOUT_MS);
+        entry.transaction = action === "begin"
+          ? { open: true, generation: entry.session.generation?.() ?? 0 }
+          : { open: false, generation: entry.session.generation?.() ?? 0 };
+      });
+      return { ok: true, action, ...transactionState(entry) };
     } catch (error) {
-      return failure(error);
+      return { ...failure(error), ...transactionState(entry) };
     }
   },
 
   async cancel({ id }) {
     const entry = sessions.get(id);
-    if (!entry) return { ok: true };
-    entry.session.cancel();
-    return { ok: true };
+    if (!entry) return { ok: true, cancelled: false };
+    const run = entry.activeRun;
+    if (run) run.cancelled = true;
+    try {
+      await settleWithin(Promise.resolve(entry.session.cancel?.()), CANCEL_SETTLE_MS);
+    } catch {
+      /* ignore */
+    }
+    return { ok: true, cancelled: Boolean(run) };
   },
 
   async disconnect({ id }) {
     const entry = sessions.get(id);
     if (!entry) return { ok: true };
-    await entry.close().catch(() => {});
+    await entry.close();
     return { ok: true };
   },
 
   async dispose() {
     const entries = Array.from(sessions.values());
     sessions.clear();
-    await Promise.all(entries.map((entry) => entry.session.close().catch(() => {})));
+    await Promise.all(entries.map((entry) => entry.close()));
     return { ok: true };
   },
 };
@@ -1370,6 +1799,40 @@ function driverClassesFromJar(payload) {
 }
 
 /** Reads a .sql script picked by the renderer; bounded so a huge file can't block. */
+/**
+ * Files the user picked in a native dialog during this run. Only these may be
+ * overwritten without asking again ("Save" after "Open" / "Save as"); any
+ * other path sent by the renderer goes back through the save dialog.
+ */
+const approvedTextFilePaths = new Set();
+const MAX_APPROVED_TEXT_FILE_PATHS = 200;
+
+function approveTextFilePath(filePath) {
+  if (typeof filePath !== "string" || !filePath) return;
+  const resolved = path.resolve(filePath);
+  approvedTextFilePaths.delete(resolved);
+  approvedTextFilePaths.add(resolved);
+  if (approvedTextFilePaths.size > MAX_APPROVED_TEXT_FILE_PATHS) {
+    approvedTextFilePaths.delete(approvedTextFilePaths.values().next().value);
+  }
+}
+
+function isApprovedTextFilePath(filePath) {
+  return typeof filePath === "string" && filePath !== "" && approvedTextFilePaths.has(path.resolve(filePath));
+}
+
+function sanitizeDialogFilters(filters) {
+  if (!Array.isArray(filters)) return undefined;
+  const clean = filters
+    .filter((entry) => entry && typeof entry.name === "string" && Array.isArray(entry.extensions))
+    .map((entry) => ({
+      name: entry.name.slice(0, 60),
+      extensions: entry.extensions.filter((ext) => typeof ext === "string" && /^[\w*]{1,12}$/.test(ext)),
+    }))
+    .filter((entry) => entry.extensions.length > 0);
+  return clean.length > 0 ? clean : undefined;
+}
+
 async function readSqlFile(rawPath) {
   const filePath = typeof rawPath === "string" ? rawPath : rawPath?.path;
   if (!filePath) return { ok: false, error: "missing-path" };
@@ -1378,6 +1841,7 @@ async function readSqlFile(rawPath) {
     if (!stat.isFile()) return { ok: false, error: "not-a-file" };
     if (stat.size > MAX_SQL_FILE_BYTES) return { ok: false, error: "too-large" };
     const text = await fs.promises.readFile(filePath, "utf8");
+    approveTextFilePath(filePath);
     return { ok: true, text, path: filePath };
   } catch (error) {
     return { ok: false, error: error?.code || error?.message || "read-failed" };
@@ -1387,20 +1851,34 @@ async function readSqlFile(rawPath) {
 const MAX_TEXT_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_BINARY_FILE_BYTES = 64 * 1024 * 1024;
 
-/** Saves a text file the renderer produced (exports, DDL dumps). */
+/**
+ * Saves a text file the renderer produced (SQL scripts, exports, DDL dumps).
+ *
+ * `path` overwrites that file directly, but only when the user already picked
+ * it in a dialog during this run; otherwise (and for "save as") the native
+ * save dialog opens, pre-filled with `path` or `defaultName`.
+ */
 async function saveTextFile(payload) {
-  const { defaultName, content } = payload || {};
+  const { defaultName, content, filters } = payload || {};
+  const targetPath = typeof payload?.path === "string" ? payload.path : "";
   if (typeof content !== "string") return { ok: false, error: "nothing-to-save" };
   if (Buffer.byteLength(content, "utf8") > MAX_TEXT_FILE_BYTES) {
     return { ok: false, error: "too-large" };
   }
   try {
+    if (targetPath && isApprovedTextFilePath(targetPath)) {
+      const resolved = path.resolve(targetPath);
+      await fs.promises.writeFile(resolved, content, "utf8");
+      return { ok: true, path: resolved };
+    }
     const { dialog } = require("electron");
     const result = await dialog.showSaveDialog({
-      defaultPath: typeof defaultName === "string" ? defaultName : undefined,
+      defaultPath: targetPath || (typeof defaultName === "string" ? defaultName : undefined),
+      filters: sanitizeDialogFilters(filters),
     });
     if (result.canceled || !result.filePath) return { ok: true, canceled: true };
     await fs.promises.writeFile(result.filePath, content, "utf8");
+    approveTextFilePath(result.filePath);
     return { ok: true, path: result.filePath };
   } catch (error) {
     return { ok: false, error: error?.message || "write-failed" };
@@ -1454,6 +1932,7 @@ module.exports = {
   registerDbHandlers,
   handlers,
   readSqlFile,
+  saveTextFile,
   saveBinaryFile,
   __test: {
     clampMaxRows,
@@ -1468,5 +1947,12 @@ module.exports = {
     mysqlTypeName,
     commandFromSql,
     sessions,
+    connectionFingerprint,
+    transactionEffectOf,
+    settleWithin,
+    resolvesWithin,
+    withTimeout,
+    createEntry,
+    getSession,
   },
 };

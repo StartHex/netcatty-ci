@@ -22,6 +22,8 @@ import { captureInheritedCwd } from '../state/inheritedCwd';
 import { fromEditorTabId, isEditorTabId } from '../state/activeTabStore';
 import { databaseTabStore, fromDatabaseTabId, isDatabaseTabId } from '../state/databaseTabStore';
 import { curlTabStore, fromCurlTabId, isCurlTabId } from '../state/curlTabStore';
+import { fromNoteTabId, isNoteTabId, noteTabStore as sharedNoteTabStore } from '../state/noteTabStore';
+import { isPluginViewEditingTarget } from '../state/pluginKeybindings';
 import { resolveBatchTabCloseFocus } from '../state/pluginViewTabStore';
 
 type AppContextGetter = () => Record<string, any>;
@@ -270,7 +272,7 @@ export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: Keybo
       }
     }
 
-    const isFormElement = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+    const isFormElement = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable || isPluginViewEditingTarget(target);
     const isMonacoElement =
       target instanceof HTMLElement &&
       !!target.closest?.('.monaco-editor, .monaco-diff-editor, .monaco-inputbox');
@@ -370,21 +372,12 @@ export function handleEscapeKeyDownImpl(getCtx: AppContextGetter, e: KeyboardEve
   const {
     isQuickSwitcherOpen,
     setIsQuickSwitcherOpen,
-    sftpPaneMagnificationRef,
-    terminalPaneMagnificationRef,
   } = getCtx();
 {
     if (e.key !== 'Escape' || e.defaultPrevented) return;
     if (isQuickSwitcherOpen) {
       setIsQuickSwitcherOpen(false);
       return;
-    }
-    if (getAvailablePaneMagnificationController([
-      sftpPaneMagnificationRef?.current,
-      terminalPaneMagnificationRef?.current,
-    ])?.restore()) {
-      e.preventDefault();
-      e.stopPropagation();
     }
   }
 }
@@ -399,6 +392,7 @@ export async function handleKeyboardInteractiveSubmitImpl(
   const {
     hosts,
     hostsRef,
+    identities,
     keyboardInteractiveQueue,
     sessions,
     setKeyboardInteractiveQueue,
@@ -432,11 +426,27 @@ export async function handleKeyboardInteractiveSubmitImpl(
     // Save password to host if requested - never for second-factor / EDR prompts
     // (allowSavePassword === false) so a secondary secret cannot overwrite the
     // host login password (#2150 / Codex review on #2151).
+    // Detach a Keychain identity when one is attached. resolveHostAuth prefers
+    // identity.password and identity.username, so snapshot the identity username
+    // onto the host before clearing identityId (#3982). Same as
+    // applyVaultHostUpdate's password detach. Do not mutate the identity.
     if (savePassword && host && request?.allowSavePassword !== false) {
+      // Work from the freshest copy of the host, like upstream does.
+      const latestHost: Host = latestHosts.find((h: Host) => h.id === host.id) ?? host;
+      const savedIdentity = latestHost.identityId
+        ? identities?.find((item: { id?: string; username?: string }) => item.id === latestHost.identityId)
+        : undefined;
+      const detachedUsername = savedIdentity?.username?.trim();
+      // Upstream: saving a typed password detaches the host from its identity
+      // (keeping the identity's username) so the saved password is the one used.
       const nextHost = {
-        ...host,
+        ...latestHost,
         password: savePassword,
         savePassword: true,
+        ...(latestHost.identityId ? {
+          identityId: '',
+          ...(detachedUsername ? { username: detachedUsername } : {}),
+        } : {}),
       };
       updateHosts(latestHosts.map((h: Host) => h.id === host.id ? nextHost : h));
 
@@ -780,6 +790,7 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace,
     confirmIfBusyLocalTerminal, logViews, sessions, workspaces,
     activeTabStore, editorTabStore, pluginViewTabStore, databaseTabStore, curlTabStore,
+    noteTabStore = sharedNoteTabStore,
     handleRequestCloseEditorTabRef, findEditorSftpOwnerTabId, orderedTabsWithEditors,
   } = getCtx();
   if (targetIds.length === 0) return true;
@@ -790,9 +801,10 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     const pluginIds = targetIds.filter((id) => pluginViewTabStore.getTab(id));
     const databaseIds = targetIds.filter((id) => isDatabaseTabId(id));
     const curlIds = targetIds.filter((id) => isCurlTabId(id));
+    const noteIds = targetIds.filter((id) => isNoteTabId(id));
     const editorIds = targetIds.filter(isEditorTabId);
     const regularIds = targetIds.filter(
-      (id) => !pluginViewTabStore.getTab(id) && !isEditorTabId(id) && !isDatabaseTabId(id) && !isCurlTabId(id),
+      (id) => !pluginViewTabStore.getTab(id) && !isEditorTabId(id) && !isDatabaseTabId(id) && !isCurlTabId(id) && !isNoteTabId(id),
     );
     // Cancel busy-terminal confirmation before making any changes, including editors.
     if (regularIds.length && !await confirmIfBusyLocalTerminal(
@@ -824,8 +836,9 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
     for (const id of pluginIds) pluginViewTabStore.close(id);
     for (const id of databaseIds) databaseTabStore.requestClose(fromDatabaseTabId(id));
     for (const id of curlIds) curlTabStore.requestClose(fromCurlTabId(id));
+    for (const id of noteIds) noteTabStore.close(fromNoteTabId(id));
 
-    const closingTabIds = new Set([...effectiveRegularIds, ...closedEditorIds, ...pluginIds, ...databaseIds, ...curlIds]);
+    const closingTabIds = new Set([...effectiveRegularIds, ...closedEditorIds, ...pluginIds, ...databaseIds, ...curlIds, ...noteIds]);
     if (closingTabIds.has(activeBeforeClose)) {
       activeTabStore.setActiveTabId(resolveBatchTabCloseFocus({
         orderedTabIds: orderedTabsWithEditors,
@@ -902,6 +915,14 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
           const index = orderedTabs.indexOf(currentId);
           const next = orderedTabs[index - 1] ?? orderedTabs[index + 1] ?? 'vault';
           setActiveTabId(next === currentId ? 'vault' : next);
+          break;
+        }
+
+        if (isNoteTabId(currentId)) {
+          const index = orderedTabs.indexOf(currentId);
+          const next = orderedTabs[index - 1] ?? orderedTabs[index + 1] ?? 'vault';
+          setActiveTabId(next === currentId ? 'vault' : next);
+          sharedNoteTabStore.close(fromNoteTabId(currentId));
           break;
         }
 
@@ -1163,17 +1184,24 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
 
 export function handleCreateLocalTerminalImpl(
   getCtx: AppContextGetter,
-  shell?: { command: string; args?: string[]; name?: string; icon?: string },
+  shell?: { command: string; args?: string[]; name?: string; icon?: string; elevated?: boolean },
   options?: { localStartDir?: string },
 ) {
   const { addConnectionLog, classifyLocalShellType, createLocalTerminal, discoveredShells, resolveShellSetting, systemInfoRef, terminalSettings } = getCtx();
 {
     const { username, hostname } = systemInfoRef.current;
-    const resolved = shell ?? resolveShellSetting(terminalSettings.localShell, discoveredShells, terminalSettings.localShellArgs);
+    // Vault/header buttons historically wired `onClick={handleCreateLocalTerminal}`.
+    // React then passes the MouseEvent as the first arg; treat only real shell
+    // objects (string command) as explicit so Settings localShell still applies (#4085).
+    const explicitShell = shell && typeof shell.command === 'string' ? shell : undefined;
+    const resolved = explicitShell
+      ?? resolveShellSetting(terminalSettings.localShell, discoveredShells, terminalSettings.localShellArgs);
     // Match by ID (not command) to avoid WSL distros all sharing wsl.exe
-    const matchedShell = !shell ? discoveredShells.find(s => s.id === terminalSettings.localShell) : undefined;
-    const shellName = shell?.name ?? matchedShell?.name;
-    const shellIcon = shell?.icon ?? matchedShell?.icon;
+    const matchedShell = !explicitShell
+      ? discoveredShells.find(s => s.id === terminalSettings.localShell)
+      : undefined;
+    const shellName = explicitShell?.name ?? matchedShell?.name;
+    const shellIcon = explicitShell?.icon ?? matchedShell?.icon;
     const sessionId = createLocalTerminal({
       shellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, navigator.userAgent),
       shell: resolved?.command,
@@ -1181,6 +1209,7 @@ export function handleCreateLocalTerminalImpl(
       shellName,
       shellIcon,
       localStartDir: options?.localStartDir,
+      elevated: explicitShell?.elevated === true ? true : undefined,
     });
     addConnectionLog({
       sessionId,
@@ -1303,16 +1332,14 @@ export function hasMultipleProtocolsImpl(getCtx: AppContextGetter, host: Host) {
 }
 
 export function handleHostConnectWithProtocolCheckImpl(getCtx: AppContextGetter, host: Host) {
-  const { handleConnectToHost, hasMultipleProtocols, resolveEffectiveHost, setIsQuickSwitcherOpen, setProtocolSelectHost, setQuickSearch } = getCtx();
+  const { handleConnectToHost, hasMultipleProtocols, resolveEffectiveHost, setIsQuickSwitcherOpen, setProtocolSelectHost } = getCtx();
 {
     if (hasMultipleProtocols(host)) {
       setProtocolSelectHost(resolveEffectiveHost(host));
       setIsQuickSwitcherOpen(false);
-      setQuickSearch('');
     } else {
       handleConnectToHost(host);
       setIsQuickSwitcherOpen(false);
-      setQuickSearch('');
     }
   }
 }

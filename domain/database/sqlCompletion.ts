@@ -95,6 +95,8 @@ export interface BuildSqlCompletionInput {
   resultColumns?: SqlCompletionColumn[];
 }
 
+const NAME_COLLATOR = new Intl.Collator();
+
 export function buildSqlCompletionEntries({
   tables = [],
   columns = [],
@@ -112,7 +114,9 @@ export function buildSqlCompletionEntries({
     entries.push(entry);
   };
 
-  const sortedTables = [...tables].sort((a, b) => a.name.localeCompare(b.name));
+  // One shared collator: String#localeCompare re-resolves the locale for every
+  // comparison and is an order of magnitude slower on thousands of names.
+  const sortedTables = [...tables].sort((a, b) => NAME_COLLATOR.compare(a.name, b.name));
   for (const table of sortedTables) {
     push({
       label: table.name,
@@ -134,7 +138,7 @@ export function buildSqlCompletionEntries({
   };
   for (const column of columns) addColumn(column, 'column');
   for (const column of resultColumns) addColumn(column, 'result');
-  for (const entry of [...columnByLabel.values()].sort((a, b) => a.label.localeCompare(b.label))) {
+  for (const entry of [...columnByLabel.values()].sort((a, b) => NAME_COLLATOR.compare(a.label, b.label))) {
     push(entry);
   }
 

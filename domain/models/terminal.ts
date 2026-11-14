@@ -71,6 +71,8 @@ export interface KeywordHighlightRule {
 export type TerminalTabDoubleClickBehavior = 'duplicate' | 'copy' | 'disabled';
 
 export interface TerminalSettings {
+  /** Context chips below quick commands in the compose bar. */
+  contextChipsEnabled?: boolean;
   // Rendering
   scrollback: number; // Number of lines kept in buffer
   drawBoldInBrightColors: boolean; // Draw bold text in bright colors
@@ -158,7 +160,7 @@ export interface TerminalSettings {
    */
   temporaryConnectionsNetworkDeviceMode: boolean;
   keepaliveInterval: number; // Seconds between SSH-level keepalive packets (0 = disabled)
-  keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead
+  keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead; 0 = never give up
   sshAutoReconnectEnabled: boolean; // Automatically reconnect SSH sessions after unexpected disconnects
   x11Display: string; // Optional local X11 DISPLAY override (empty = use system DISPLAY/default)
 
@@ -440,6 +442,7 @@ export const normalizeTerminalSettings = (
   const mergedSettings = {
     ...DEFAULT_TERMINAL_SETTINGS,
     ...(settings ?? {}),
+    contextChipsEnabled: settings?.contextChipsEnabled !== false,
     middleClickBehavior,
     middleClickPaste: middleClickBehavior === 'paste',
     wordSeparators,
@@ -533,6 +536,7 @@ export function isLegacyDefaultShiftEnterNewlineText(value: unknown): boolean {
 }
 
 const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
+  contextChipsEnabled: true,
   scrollback: DEFAULT_TERMINAL_SCROLLBACK,
   drawBoldInBrightColors: true,
   autoAnswerOtpMenu: true,
@@ -712,6 +716,7 @@ export interface TerminalSession {
   localShellName?: string;   // Display name for local shell (e.g., "Zsh", "Ubuntu (WSL)")
   localShellIcon?: string;   // Icon identifier for local shell (e.g., "zsh", "ubuntu")
   localStartDir?: string;    // Per-session starting directory for local terminals
+  localElevated?: boolean;   // Local shell runs as administrator / root
   // For sessions created from an existing SSH session: the id of the source
   // session whose already-authenticated connection should be reused so the new
   // shell channel does not trigger a second MFA prompt (issue #1204). The

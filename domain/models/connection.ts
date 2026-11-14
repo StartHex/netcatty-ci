@@ -221,6 +221,9 @@ export interface Host {
   identityFileId?: string; // Reference to SSHKey
   protocol?: HostProtocol; // Default/primary protocol, including namespaced plugin protocols
   pluginConnection?: PluginConnectionConfig;
+  // SSH interactive IME/short-paste compatibility; applied on reconnect.
+  // Missing on legacy records; sanitizeHost preserves their previous behavior.
+  sshInputCompatibility?: boolean;
   // Runtime marker for in-memory-only hosts (e.g. password deep links).
   // Ephemeral hosts are never persisted to the vault or session restore.
   ephemeral?: boolean;
@@ -341,14 +344,22 @@ export interface Host {
   // specific router / embedded device whose SSH stack doesn't reply to
   // OpenSSH keepalive global requests (issue #581 / #939).
   keepaliveInterval?: number; // Seconds; 0 = disabled
-  keepaliveCountMax?: number; // Unanswered keepalives before declaring dead
+  keepaliveCountMax?: number; // Unanswered keepalives before declaring dead; 0 = never give up
   keepaliveOverride?: boolean;
+  // Anti-idle input: when > 0, `antiIdleText` is typed into the shell after
+  // this many seconds without input or output. For servers that log idle
+  // users out (bash TMOUT, bastion idle policies) no matter what SSH
+  // keepalives say. Escapes such as \n and \x00 are decoded in the bridge.
+  antiIdleInterval?: number;
+  antiIdleText?: string;
   // Per-host SSH connection timeouts. Missing values retain Netcatty defaults.
   sshTcpConnectTimeoutSeconds?: number;
   sshAuthReadyTimeoutSeconds?: number;
   // Show local timestamps for this host beside terminal output rows.
   // Kept per-host because timestamp visibility is usually a host/workflow preference.
   showLineTimestamps?: boolean;
+  /** Show a line-number gutter beside this host's terminal output. */
+  showLineNumbers?: boolean;
   // What the Backspace key sends: undefined = xterm default (no interception), 'ctrl-h' = ^H (0x08)
   backspaceBehavior?: 'ctrl-h';
   // When true, tab titles stay on the connection label instead of following the
@@ -368,6 +379,8 @@ export interface Host {
   localShellName?: string;
   localShellIcon?: string;
   localStartDir?: string;
+  /** Local shell only: run as administrator (Windows) or as root through sudo (macOS, Linux). */
+  localElevated?: boolean;
   /** User-authored Markdown notes (project, hardware, region, etc.) */
   notes?: string;
   order?: number;
@@ -454,6 +467,18 @@ export interface VaultNote {
   updatedAt: number;
   order?: number;
   isPinned?: boolean;
+  /**
+   * Which area the note lives in. Absent means the everyday ("daily") area;
+   * 'organized' is the area for cleaned-up notes. Independent of `group`:
+   * moving a note between areas keeps its folder.
+   */
+  area?: 'organized';
+  /** Daily note that has been folded into an organized note (hidden by default). */
+  organizedAt?: number;
+  /** The organized note this daily note was folded into. */
+  organizedInto?: string;
+  /** Daily notes an organized note was written from. */
+  organizedFrom?: string[];
 }
 
 export interface ChatMessage {

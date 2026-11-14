@@ -1,13 +1,58 @@
-import React, { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import React, { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type MarkdownActionType, wrapMarkdownSyntax } from "../../domain/notes";
+import {
+  createNoteSearchPattern,
+  noteSearchTermsKey,
+  scanNoteSearchMatches,
+} from "../../domain/notes/noteSearch";
+import type { NoteSearchHighlightRequest } from "./noteEditorTypes";
 
 const SOURCE_EDIT_UNDO_COALESCE_MS = 750;
+/** Same cap as the rich editor so a one-letter query cannot build huge DOM. */
+const SOURCE_SEARCH_MAX_HIGHLIGHTS = 2000;
+/** Above this size the highlight backdrop is skipped; reveal still scrolls. */
+const SOURCE_SEARCH_BACKDROP_MAX_CHARS = 400_000;
+const SOURCE_LINE_HEIGHT_PX = 24;
+const SOURCE_BLOCK_PADDING_PX = 12;
+
+const countLineBreaksBefore = (text: string, offset: number): number => {
+  let count = 0;
+  let index = text.indexOf("\n");
+  while (index !== -1 && index < offset) {
+    count += 1;
+    index = text.indexOf("\n", index + 1);
+  }
+  return count;
+};
 
 interface SourceHistorySnapshot {
   value: string;
   selectionStart: number;
   selectionEnd: number;
 }
+
+/** Undo steps kept per note; the oldest steps are dropped first. */
+export const MAX_SOURCE_HISTORY_STEPS = 200;
+/**
+ * Every step holds a full copy of the note, so long sessions on a large note
+ * grew without bound. Also cap the text the steps hold (~16 MB as UTF-16).
+ */
+export const MAX_SOURCE_HISTORY_CHARS = 8_000_000;
+
+export const pushSourceHistory = <T extends { value: string }>(stack: T[], snapshot: T): void => {
+  stack.push(snapshot);
+  let chars = 0;
+  for (const entry of stack) chars += entry.value.length;
+  let drop = 0;
+  while (
+    stack.length - drop > 1
+    && (stack.length - drop > MAX_SOURCE_HISTORY_STEPS || chars > MAX_SOURCE_HISTORY_CHARS)
+  ) {
+    chars -= stack[drop].value.length;
+    drop += 1;
+  }
+  if (drop > 0) stack.splice(0, drop);
+};
 
 export const shouldCoalesceSourceUndoStep = (
   previous: { inputType: string; at: number; caret: number } | null,
@@ -72,15 +117,37 @@ export interface NoteSourceEditorProps {
   noteFontSize?: number;
   /** Blocks edits (used when the rich editor cannot render the markdown). */
   readOnly?: boolean;
+  /** Notes-tree search: paints every match behind the text and reveals the active one. */
+  searchHighlight?: NoteSearchHighlightRequest;
+  onSearchMatchCountChange?: (count: number) => void;
 }
 
 export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSourceEditorProps>(
-  ({ noteId, value, placeholder = "", onChange, className = "", noteFontFamily, noteFontSize, readOnly = false }, ref) => {
+  (
+    {
+      noteId,
+      value,
+      placeholder = "",
+      onChange,
+      className = "",
+      noteFontFamily,
+      noteFontSize,
+      readOnly = false,
+      searchHighlight,
+      onSearchMatchCountChange,
+    },
+    ref,
+  ) => {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const lineNumbersRef = useRef<HTMLDivElement>(null);
+    const searchBackdropRef = useRef<HTMLDivElement>(null);
     const [localValue, setLocalValue] = useState(value);
     const prevNoteIdRef = useRef(noteId);
     const prevValueRef = useRef(value);
+    // During the render right after a note switch `localValue` still holds the
+    // previous note (the adopt effect below has not run yet), so search
+    // results computed now must not be reported or revealed.
+    const localValueMatchesNote = noteId === prevNoteIdRef.current;
 
     // Undo/redo history for the source textarea (native textarea undo is
     // unreliable once the value is controlled by React).
@@ -142,11 +209,114 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
     );
     const gutterWidth = Math.max(48, String(lineCount).length * 9 + 24);
 
+    const searchTermsKey = noteSearchTermsKey(searchHighlight?.terms ?? []);
+    const searchPattern = useMemo(
+      () => createNoteSearchPattern(searchTermsKey ? searchTermsKey.split("\u0000") : []),
+      [searchTermsKey],
+    );
+    const searchRanges = useMemo(
+      () => (searchPattern
+        ? scanNoteSearchMatches(localValue, searchPattern, {
+          maxRanges: SOURCE_SEARCH_MAX_HIGHLIGHTS,
+          maxCount: SOURCE_SEARCH_MAX_HIGHLIGHTS,
+        }).ranges
+        : null),
+      [localValue, searchPattern],
+    );
+    const searchMatchCount = searchRanges?.length ?? 0;
+    const requestedOccurrence = searchHighlight?.activeOccurrence ?? null;
+    const activeSearchIndex = requestedOccurrence !== null && searchMatchCount > 0
+      ? ((requestedOccurrence % searchMatchCount) + searchMatchCount) % searchMatchCount
+      : null;
+    const revealToken = searchHighlight?.revealToken ?? 0;
+    const lastRevealTokenRef = useRef<number | null>(null);
+    const pendingRevealRef = useRef<number | null>(null);
+    if (lastRevealTokenRef.current !== revealToken) {
+      lastRevealTokenRef.current = revealToken;
+      if (requestedOccurrence !== null) pendingRevealRef.current = revealToken;
+    }
+
+    const searchBackdrop = useMemo(() => {
+      if (!searchRanges || searchRanges.length === 0) return null;
+      if (localValue.length > SOURCE_SEARCH_BACKDROP_MAX_CHARS) return null;
+      const nodes: React.ReactNode[] = [];
+      let cursor = 0;
+      searchRanges.forEach(([start, end], index) => {
+        if (start > cursor) nodes.push(localValue.slice(cursor, start));
+        const active = index === activeSearchIndex;
+        nodes.push(
+          <mark
+            key={index}
+            className={active
+              ? "netcatty-source-search-mark netcatty-source-search-mark--active"
+              : "netcatty-source-search-mark"}
+            data-active={active ? "true" : undefined}
+          >
+            {localValue.slice(start, end)}
+          </mark>,
+        );
+        cursor = end;
+      });
+      // Trailing newline keeps the last line box as tall as the textarea's.
+      nodes.push(`${localValue.slice(cursor)}\n`);
+      return nodes;
+    }, [activeSearchIndex, localValue, searchRanges]);
+
+    const syncSearchBackdrop = () => {
+      const textarea = textareaRef.current;
+      const backdrop = searchBackdropRef.current;
+      if (!textarea || !backdrop) return;
+      backdrop.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
+    };
+
     const handleScroll = () => {
       if (textareaRef.current && lineNumbersRef.current) {
         lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
       }
+      syncSearchBackdrop();
     };
+
+    // The backdrop mounts after the textarea may already be scrolled.
+    useLayoutEffect(() => {
+      syncSearchBackdrop();
+    });
+
+    const onSearchMatchCountChangeRef = useRef(onSearchMatchCountChange);
+    onSearchMatchCountChangeRef.current = onSearchMatchCountChange;
+    useEffect(() => {
+      if (!searchPattern || !localValueMatchesNote) return;
+      onSearchMatchCountChangeRef.current?.(searchMatchCount);
+    }, [localValueMatchesNote, searchMatchCount, searchPattern]);
+
+    useEffect(() => {
+      if (pendingRevealRef.current === null || !localValueMatchesNote) return;
+      if (activeSearchIndex === null || !searchRanges) return;
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      pendingRevealRef.current = null;
+      const mark = searchBackdropRef.current?.querySelector<HTMLElement>('mark[data-active="true"]');
+      const top = mark
+        ? mark.offsetTop
+        : SOURCE_BLOCK_PADDING_PX
+          + countLineBreaksBefore(localValue, searchRanges[activeSearchIndex][0]) * SOURCE_LINE_HEIGHT_PX;
+      const targetTop = Math.max(0, top - textarea.clientHeight / 3);
+      let targetLeft = textarea.scrollLeft;
+      if (mark) {
+        const left = mark.offsetLeft;
+        const right = left + mark.offsetWidth;
+        if (left < textarea.scrollLeft + 16 || right > textarea.scrollLeft + textarea.clientWidth - 16) {
+          targetLeft = Math.max(0, left - textarea.clientWidth / 3);
+        }
+      }
+      const reduceMotion = typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (typeof textarea.scrollTo === "function") {
+        textarea.scrollTo({ top: targetTop, left: targetLeft, behavior: reduceMotion ? "auto" : "smooth" });
+      } else {
+        textarea.scrollTop = targetTop;
+        textarea.scrollLeft = targetLeft;
+      }
+    }, [activeSearchIndex, localValue, localValueMatchesNote, revealToken, searchRanges]);
 
     const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       if (readOnly) return;
@@ -173,7 +343,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
             edit.start + edit.removedLength,
           );
           compositionBaselineRef.current = baseline;
-          undoStackRef.current.push(baseline);
+          pushSourceHistory(undoStackRef.current, baseline);
           redoStackRef.current = [];
         }
         if (inputType === "insertFromComposition") compositionBaselineRef.current = null;
@@ -189,7 +359,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
         const previousSelectionStart = inputType === "deleteContentBackward"
           ? edit.start + edit.removedLength
           : edit.start;
-        undoStackRef.current.push(createSnapshot(
+        pushSourceHistory(undoStackRef.current, createSnapshot(
           localValue,
           previousSelectionStart,
           edit.start + edit.removedLength,
@@ -214,9 +384,9 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
       compositionBaselineRef.current = null;
       const current = createSnapshot();
       if (action === "undo") {
-        redoStackRef.current.push(current);
+        pushSourceHistory(redoStackRef.current, current);
       } else {
-        undoStackRef.current.push(current);
+        pushSourceHistory(undoStackRef.current, current);
       }
       setLocalValue(target.value);
       onChange(target.value);
@@ -260,7 +430,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
         const start = textarea.selectionStart;
         const end = textarea.selectionEnd;
         const nextValue = `${localValue.substring(0, start)}  ${localValue.substring(end)}`;
-        undoStackRef.current.push(createSnapshot(localValue, start, end));
+        pushSourceHistory(undoStackRef.current, createSnapshot(localValue, start, end));
         redoStackRef.current = [];
         compositionBaselineRef.current = null;
         resetUserEditCoalescing();
@@ -287,7 +457,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
         const end = textarea.selectionEnd;
         const result = wrapMarkdownSyntax(localValue, start, end, action);
         if (result.text !== localValue) {
-          undoStackRef.current.push(createSnapshot(localValue, start, end));
+          pushSourceHistory(undoStackRef.current, createSnapshot(localValue, start, end));
           redoStackRef.current = [];
           compositionBaselineRef.current = null;
           resetUserEditCoalescing();
@@ -338,6 +508,26 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
 
         {/* Source Textarea */}
         <div className="relative flex-1 h-full min-w-0">
+          {searchBackdrop ? (
+            // Mirror of the textarea text (transparent glyphs) carrying the
+            // search marks; it scrolls with the textarea through a transform.
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 overflow-hidden"
+              data-note-source-search-backdrop="true"
+            >
+              <div
+                ref={searchBackdropRef}
+                className="py-3 px-4 font-mono text-sm leading-6 whitespace-pre text-transparent will-change-transform"
+                style={{
+                  fontFamily: noteFontFamily || undefined,
+                  fontSize: noteFontSize ? `${noteFontSize}px` : undefined,
+                }}
+              >
+                {searchBackdrop}
+              </div>
+            </div>
+          ) : null}
           <textarea
             ref={textareaRef}
             value={localValue}
@@ -350,7 +540,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
               if (compositionBaselineRef.current === null) {
                 const baseline = createSnapshot();
                 compositionBaselineRef.current = baseline;
-                undoStackRef.current.push(baseline);
+                pushSourceHistory(undoStackRef.current, baseline);
                 redoStackRef.current = [];
               }
               resetUserEditCoalescing();
@@ -372,7 +562,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
               fontFamily: noteFontFamily || undefined,
               fontSize: noteFontSize ? `${noteFontSize}px` : undefined,
             }}
-            className="w-full h-full py-3 px-4 bg-transparent text-foreground resize-none outline-none font-mono text-sm leading-6 whitespace-pre overflow-auto"
+            className="relative w-full h-full py-3 px-4 bg-transparent text-foreground resize-none outline-none font-mono text-sm leading-6 whitespace-pre overflow-auto"
           />
         </div>
       </div>

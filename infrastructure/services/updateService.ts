@@ -6,14 +6,21 @@
  * 2. electron-updater bridge (used by SettingsSystemTab for download/install)
  */
 
+import {
+  FORK_RELEASES_API_URL,
+  FORK_RELEASES_URL,
+  compareForkVersions,
+  pickLatestForkRelease,
+} from "../config/forkRelease";
 import { netcattyBridge } from "./netcattyBridge";
 
 // ================================
 // Part 1: GitHub API Version Check
 // ================================
 
-const GITHUB_API_URL = 'https://api.github.com/repos/binaricat/Netcatty/releases/latest';
-const RELEASES_PAGE_URL = 'https://github.com/binaricat/Netcatty/releases';
+// Releases come from this fork's own repository, never from upstream: see
+// infrastructure/config/forkRelease.ts.
+const RELEASES_PAGE_URL = FORK_RELEASES_URL;
 
 export interface ReleaseInfo {
   version: string;       // e.g. "1.0.0" (without 'v' prefix)
@@ -39,34 +46,11 @@ export interface UpdateCheckResult {
 }
 
 /**
- * Parse version string to comparable array
- * e.g. "1.2.3" -> [1, 2, 3]
- */
-function parseVersion(version: string): number[] {
-  // Remove 'v' prefix if present
-  const clean = version.replace(/^v/i, '');
-  return clean.split('.').map((part) => {
-    const num = parseInt(part, 10);
-    return isNaN(num) ? 0 : num;
-  });
-}
-
-/**
- * Compare two version strings
+ * Compare two version strings (fork-aware: `1.1.90-fork.58` > `1.1.90-fork.57`).
  * Returns: 1 if a > b, -1 if a < b, 0 if equal
  */
 export function compareVersions(a: string, b: string): number {
-  const partsA = parseVersion(a);
-  const partsB = parseVersion(b);
-  const maxLen = Math.max(partsA.length, partsB.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const numA = partsA[i] ?? 0;
-    const numB = partsB[i] ?? 0;
-    if (numA > numB) return 1;
-    if (numA < numB) return -1;
-  }
-  return 0;
+  return compareForkVersions(a, b);
 }
 
 /**
@@ -75,7 +59,7 @@ export function compareVersions(a: string, b: string): number {
  */
 export async function checkForUpdates(currentVersion: string): Promise<UpdateCheckResult> {
   try {
-    const response = await fetch(GITHUB_API_URL, {
+    const response = await fetch(FORK_RELEASES_API_URL, {
       headers: { Accept: 'application/vnd.github.v3+json' },
     });
 
@@ -83,7 +67,12 @@ export async function checkForUpdates(currentVersion: string): Promise<UpdateChe
       throw new Error(`GitHub API returned ${response.status}`);
     }
 
-    const data = await response.json();
+    const releases = await response.json();
+    const data = pickLatestForkRelease(Array.isArray(releases) ? releases : []);
+    if (!data) {
+      // No versioned fork release published yet: nothing to offer.
+      return { hasUpdate: false, currentVersion, latestRelease: null };
+    }
     const latestVersion = (data.tag_name as string).replace(/^v/i, '');
 
     const latestRelease: ReleaseInfo = {

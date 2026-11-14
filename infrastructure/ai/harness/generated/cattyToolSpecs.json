@@ -62,6 +62,52 @@
     }
   },
   {
+    "capabilityId": "session.reconnect",
+    "toolName": "session_reconnect",
+    "rpcMethod": "session/reconnect",
+    "localExecution": false,
+    "description": "Request reconnect of a disconnected session in the current scope, preserving its tab and workspace. Does not restart connected sessions or replay commands. Returns acknowledgement, not shell readiness. Recovery is limited to three attempts with 2/5 second backoff in a 120 second incident; inspect authentication or exhausted recovery instead of retrying indefinitely.",
+    "inputShape": {
+      "sessionId": {
+        "type": "string",
+        "optional": false,
+        "description": "An existing disconnected terminal session ID in the current granted scope."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": true,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    }
+  },
+  {
+    "capabilityId": "session.recover",
+    "toolName": "session_recover",
+    "rpcMethod": "session/recover",
+    "localExecution": false,
+    "description": "Inspect and recover a scoped disconnected session in place. Automatically applies bounded reconnect/backoff for up to 20 seconds per call and reports ready only once the transport is restored (still-offline budgets return pending); shellReady is advisory (true/false/null) and, when unconfirmed, nextAction \"inspect_shell\" asks you to verify the prompt before typing. Stops for authentication, busy jobs, cancellation or unavailable state. Never creates tabs or executes/replays commands.",
+    "inputShape": {
+      "sessionId": {
+        "type": "string",
+        "optional": false,
+        "description": "The existing terminal session ID in the current granted scope. Recovery preserves this session and never replays commands."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": true,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    }
+  },
+  {
     "capabilityId": "session.close",
     "toolName": "session_close",
     "rpcMethod": "session/close",
@@ -877,8 +923,49 @@
     "toolName": "vault_notes_list",
     "rpcMethod": "vault/notes/list",
     "localExecution": false,
-    "description": "List notes in Vault → Notes (markdown notes visible in the vault sidebar).",
-    "inputShape": {},
+    "description": "List notes in Vault → Notes, newest first, without bodies. Notes live in two areas: \"daily\" (everyday jottings) and \"organized\" (cleaned-up notes). Filter by area, folder, updated/created time range, and organized=false for daily notes not yet written up. To organize a day's notes: list them (area=daily, organized=false, updatedAfter=<date>), read each with vault_notes_get, then create the write-up with vault_notes_create (area=organized, organizedFrom=<source ids>).",
+    "inputShape": {
+      "area": {
+        "type": "string",
+        "optional": true,
+        "description": "Notes area: \"daily\" (everyday notes) or \"organized\" (cleaned-up notes). Omit for both."
+      },
+      "group": {
+        "type": "string",
+        "optional": true,
+        "description": "Folder path; includes its subfolders."
+      },
+      "updatedAfter": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes updated at or after this instant: ISO date (2026-11-11 = local midnight), ISO date-time, or epoch milliseconds."
+      },
+      "updatedBefore": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes updated before this instant (same formats)."
+      },
+      "createdAfter": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes created at or after this instant (same formats)."
+      },
+      "createdBefore": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes created before this instant (same formats)."
+      },
+      "organized": {
+        "type": "string",
+        "optional": true,
+        "description": "\"false\": daily notes not yet written up (the ones to organize). \"true\": daily notes already marked as organized."
+      },
+      "limit": {
+        "type": "number",
+        "optional": true,
+        "description": "Maximum notes to return, newest first; default and cap 500."
+      }
+    },
     "policy": {
       "write": false,
       "sensitiveRead": false,
@@ -937,7 +1024,7 @@
     "toolName": "vault_notes_create",
     "rpcMethod": "vault/notes/create",
     "localExecution": false,
-    "description": "Create a note in Vault → Notes sidebar (markdown documentation). NOT for adding SSH hosts — use vault_hosts_create for that. Use ONLY when the user wants markdown documentation in Vault → Notes sidebar (保险箱笔记). Do NOT use when the user asked to create/add a host — use vault_hosts_create instead.",
+    "description": "Create a note in Vault → Notes sidebar (markdown documentation). area=organized puts it in the organized area; with organizedFrom the listed daily notes are marked as organized and linked to it in the same step (their text is kept). NOT for adding SSH hosts — use vault_hosts_create for that. Use ONLY when the user wants markdown documentation in Vault → Notes sidebar (保险箱笔记). Do NOT use when the user asked to create/add a host — use vault_hosts_create instead.",
     "inputShape": {
       "title": {
         "type": "string",
@@ -963,6 +1050,16 @@
         "type": "string",
         "optional": true,
         "description": "Optional JSON array of tag strings."
+      },
+      "area": {
+        "type": "string",
+        "optional": true,
+        "description": "Area for the new note: \"daily\" (default) or \"organized\"."
+      },
+      "organizedFrom": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON array of daily note IDs this organized note was written from. Requires area=organized; marks those notes as organized (their text is kept)."
       }
     },
     "policy": {
@@ -1077,6 +1174,130 @@
         "type": "string",
         "optional": true,
         "description": "Optional folder path applied to every imported note."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    }
+  },
+  {
+    "capabilityId": "vault.note.search",
+    "toolName": "vault_notes_search",
+    "rpcMethod": "vault/notes/search",
+    "localExecution": false,
+    "description": "Full-text search across Vault → Notes (titles, bodies, folders, tags). Space-separated terms must all match; quote a phrase. Returns matching notes with line snippets; read a hit with vault_notes_get. Can be limited to an area, folder or time range.",
+    "inputShape": {
+      "query": {
+        "type": "string",
+        "optional": false,
+        "description": "Search text, 1-200 characters. Space-separated terms must all match; use double quotes for a phrase. Case-insensitive."
+      },
+      "area": {
+        "type": "string",
+        "optional": true,
+        "description": "Notes area: \"daily\" (everyday notes) or \"organized\" (cleaned-up notes). Omit for both."
+      },
+      "group": {
+        "type": "string",
+        "optional": true,
+        "description": "Folder path; includes its subfolders."
+      },
+      "updatedAfter": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes updated at or after this instant: ISO date (2026-11-11 = local midnight), ISO date-time, or epoch milliseconds."
+      },
+      "updatedBefore": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes updated before this instant (same formats)."
+      },
+      "createdAfter": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes created at or after this instant (same formats)."
+      },
+      "createdBefore": {
+        "type": "string",
+        "optional": true,
+        "description": "Only notes created before this instant (same formats)."
+      },
+      "limit": {
+        "type": "number",
+        "optional": true,
+        "description": "Maximum notes to return; default 20, cap 50."
+      }
+    },
+    "policy": {
+      "write": false,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": true,
+      "bypassesChatCancel": true
+    }
+  },
+  {
+    "capabilityId": "vault.note.move",
+    "toolName": "vault_notes_move",
+    "rpcMethod": "vault/notes/move",
+    "localExecution": false,
+    "description": "Move notes between the daily and organized areas of Vault → Notes. Only the area changes (and the folder when group is given); the text is untouched and the move can be reversed.",
+    "inputShape": {
+      "noteIds": {
+        "type": "string",
+        "optional": false,
+        "description": "JSON array of note IDs to move."
+      },
+      "area": {
+        "type": "string",
+        "optional": false,
+        "description": "Target area: \"daily\" or \"organized\"."
+      },
+      "group": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional target folder path for every moved note. Empty string clears the folder. Omit to keep each note's folder."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    }
+  },
+  {
+    "capabilityId": "vault.note.markOrganized",
+    "toolName": "vault_notes_mark_organized",
+    "rpcMethod": "vault/notes/mark-organized",
+    "localExecution": false,
+    "description": "Mark daily notes as organized after writing them up, optionally linking them to the organized note (organizedNoteId). Marked notes keep their text and stay in the daily area, hidden by default. undo=true removes the mark.",
+    "inputShape": {
+      "noteIds": {
+        "type": "string",
+        "optional": false,
+        "description": "JSON array of daily-area note IDs that have been written up."
+      },
+      "organizedNoteId": {
+        "type": "string",
+        "optional": true,
+        "description": "The organized-area note they were written into; links both ways."
+      },
+      "undo": {
+        "type": "string",
+        "optional": true,
+        "description": "\"true\" removes the organized mark from these notes instead."
       }
     },
     "policy": {

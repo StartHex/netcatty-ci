@@ -49,8 +49,20 @@ jobs:
       - name: Verify Codex App Server schema
         run: npm run check:codex-app-server-schema
 
+      - name: Verify plugin contract and runtime boundaries
+        run: |
+          npm run check:plugin-contract
+          npm run test:plugin-runtime
+          npm run test:plugin-examples
+          node --test --import tsx components/settings/tabs/Plugin*.test.tsx
+
       - name: Test
         run: npm test
+
+      - name: Test SSH cipher negotiation in Electron's crypto runtime
+        env:
+          NETCATTY_SSH_TEST_RUNTIME: electron
+        run: node --test electron/bridges/sshChaChaTransport.test.cjs
 
       - name: Test browser first-link lifecycle
         run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox electron/hostBrowser/hostBrowser.firstLink.live.test.cjs
@@ -118,6 +130,37 @@ jobs:
           NETCATTY_FIDO_WINDOWS: "1"
         run: node --test scripts/fido-windows.live.test.cjs electron/bridges/fidoNativeAgent.test.cjs electron/bridges/fidoAskpass.winpath.test.cjs
 
+  windows-setup-shell:
+    name: windows-setup-shell
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Compiles the installer window with the C# compiler Windows ships and
+      # renders every screen. The PNGs are printed to the log so the layout
+      # can be reviewed without downloading artifacts.
+      - name: Compile setup shell
+        run: node scripts/build-windows-setup-shell.cjs --stub-only --version 1.2.3-fork.4
+
+      - name: Render setup shell screens
+        run: node scripts/test-windows-setup-shell.cjs --shell release/.setup-shell/NetcattySetup.exe --screens --dump --lang zh-CN --out release/.setup-shell/screens
+
+      - name: Upload setup shell screens
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: setup-shell-screens
+          path: release/.setup-shell/screens/*
+          if-no-files-found: ignore
+          retention-days: 7
+
   windows-broadcast-ssh:
     name: windows-broadcast-ssh
     runs-on: windows-latest
@@ -138,5 +181,23 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Test SSH cipher negotiation in Windows Electron's crypto runtime
+        env:
+          NETCATTY_SSH_TEST_RUNTIME: electron
+        run: node --test electron/bridges/sshChaChaTransport.test.cjs
+
       - name: Exercise two SSH password prompts in the desktop app
         run: node scripts/terminal-broadcast-ssh.live.cjs
+
+      - name: Exercise the administrator local terminal (cmd and PowerShell)
+        run: npx electron scripts/elevated-local-pty.live.test.cjs
+
+      - name: Exercise note tabs in the desktop app
+        env:
+          NETCATTY_NOTE_TABS_SCREENSHOT: "1"
+        run: node scripts/note-tabs.live.cjs
+
+      - name: Exercise terminal line numbers, marks and range copy in the desktop app
+        env:
+          NETCATTY_LINE_TOOLS_SCREENSHOT: "1"
+        run: node scripts/terminal-line-tools.live.cjs

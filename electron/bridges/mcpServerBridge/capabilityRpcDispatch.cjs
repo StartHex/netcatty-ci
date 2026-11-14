@@ -25,6 +25,9 @@ const SERVICE_BINDINGS = Object.freeze({
   "vault.note.update": { domain: "vault", method: "updateNote" },
   "vault.note.delete": { domain: "vault", method: "deleteNote" },
   "vault.note.import": { domain: "vault", method: "importNotes" },
+  "vault.note.search": { domain: "vault", method: "searchNotes" },
+  "vault.note.move": { domain: "vault", method: "moveNotes" },
+  "vault.note.markOrganized": { domain: "vault", method: "markNotesOrganized" },
   "vault.identity.list": { domain: "vault", method: "listIdentities" },
   "vault.proxyProfile.list": { domain: "vault", method: "listProxyProfiles" },
   "vault.group.list": { domain: "vault", method: "listGroups" },
@@ -60,6 +63,8 @@ const SERVICE_BINDINGS = Object.freeze({
   "portforward.start": { domain: "portforward", method: "start" },
   "portforward.stop": { domain: "portforward", method: "stop" },
   "session.close": { domain: "session", method: "close" },
+  "session.reconnect": { domain: "session", method: "reconnect" },
+  "session.recover": { domain: "session", method: "recover" },
 });
 
 function resolveCapabilitySurface(rpcMethod) {
@@ -96,6 +101,8 @@ function createCapabilityRpcDispatcher(deps) {
   const sessionService = deps.sessionService || createSessionService({
     invokeSessionAgent: invokeVaultAgent,
     validateClose: deps.validateSessionClose,
+    validateReconnect: deps.validateSessionReconnect,
+    inspectRecovery: deps.inspectSessionRecovery,
     beforeClose: deps.beforeSessionClose,
     afterClose: deps.afterSessionClose,
     onClosed: deps.onSessionClosed,
@@ -130,10 +137,10 @@ function createCapabilityRpcDispatcher(deps) {
       return UNROUTED;
     }
 
-    // Only session.close executes against params.sessionId. host.open instead
+    // Session lifecycle operations execute against params.sessionId. host.open instead
     // targets its requested vault host; other vault/script operations must not
     // borrow an unrelated session's host grant.
-    let approvalTarget = capability.id === "session.close"
+    let approvalTarget = ["session.close", "session.reconnect", "session.recover"].includes(capability.id)
       ? (deps.getApprovalTarget?.(params) || null)
       : null;
     if (capability.id === "vault.host.open" && deps.permissionMode === PERMISSION_MODES.CONFIRM) {
@@ -157,7 +164,9 @@ function createCapabilityRpcDispatcher(deps) {
         hostname: host?.hostname || "",
       };
     }
-    const permission = evaluatePermissionWithGrants({
+    const permission = deps.isDelegatedApproval?.(approvalContext)
+      ? { allowed: !isChatSessionCancelled(params?.chatSessionId), requiresApproval: false }
+      : evaluatePermissionWithGrants({
       rpcMethod,
       surface,
       permissionMode: deps.permissionMode,
@@ -199,7 +208,13 @@ function createCapabilityRpcDispatcher(deps) {
       ? deps.captureHostOpenScope?.(params?.chatSessionId)
       : null;
     approvalContext.beforeExecute?.();
-    const result = await handler(params, approvalContext);
+    // Notes carry their own user policy (off by default, optional secret
+    // masking) for clients connected over MCP. The flag is always set here
+    // from the resolved surface, so a caller can neither forge nor clear it.
+    const handlerParams = capability.id.startsWith("vault.note.")
+      ? { ...params, __viaMcp: surface === CAPABILITY_SURFACES.PUBLIC }
+      : params;
+    const result = await handler(handlerParams, approvalContext);
     if (capability.id === "vault.host.open" && result?.ok !== false && result?.sessionId) {
       const bound = await deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration, result);
       if (bound === false) {

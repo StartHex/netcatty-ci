@@ -21,6 +21,12 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     jobId: { type: "string", description: "The background job ID returned by terminal_start." },
   },
   "session.environment": {},
+  "session.reconnect": {
+    sessionId: { type: "string", description: "An existing disconnected terminal session ID in the current granted scope." },
+  },
+  "session.recover": {
+    sessionId: { type: "string", description: "The existing terminal session ID in the current granted scope. Recovery preserves this session and never replays commands." },
+  },
   "session.close": {
     sessionId: { type: "string", description: "The session ID returned by host_open." },
   },
@@ -83,7 +89,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
   "vault.host.list": {},
   "vault.host.open": {
     hostId: { type: "string", description: "Vault host ID to open. Use vault_hosts_list / host_get to resolve id from label or hostname." },
-    workspaceId: { type: "string", optional: true, description: "Target workspace ID or current (active workspace). Applies to newly opened sessions; reused sessions retain their placement. Omit for a standalone tab." },
+    workspaceId: { type: "string", optional: true, description: "Target workspace ID. Omit to open into the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace); unbound chats get a standalone tab. 'current' means the chat's bound workspace, or the active workspace when unbound. Applies to newly opened sessions; reused sessions retain their placement." },
     newTab: { type: "string", optional: true, description: "true or false. Force a brand-new tab even when a session for this host already exists. Default false — reuse the existing session." },
   },
   "vault.hosts.create": {
@@ -166,7 +172,36 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     hostId: { type: "string", description: "Vault host ID." },
     notes: { type: "string", description: "Host metadata notes (Host Details — not Vault sidebar Notes)." },
   },
-  "vault.note.list": {},
+  "vault.note.list": {
+    area: { type: "string", optional: true, description: 'Notes area: "daily" (everyday notes) or "organized" (cleaned-up notes). Omit for both.' },
+    group: { type: "string", optional: true, description: "Folder path; includes its subfolders." },
+    updatedAfter: { type: "string", optional: true, description: "Only notes updated at or after this instant: ISO date (2026-11-11 = local midnight), ISO date-time, or epoch milliseconds." },
+    updatedBefore: { type: "string", optional: true, description: "Only notes updated before this instant (same formats)." },
+    createdAfter: { type: "string", optional: true, description: "Only notes created at or after this instant (same formats)." },
+    createdBefore: { type: "string", optional: true, description: "Only notes created before this instant (same formats)." },
+    organized: { type: "string", optional: true, description: "\"false\": daily notes not yet written up (the ones to organize). \"true\": daily notes already marked as organized." },
+    limit: { type: "number", optional: true, description: "Maximum notes to return, newest first; default and cap 500." },
+  },
+  "vault.note.search": {
+    query: { type: "string", description: "Search text, 1-200 characters. Space-separated terms must all match; use double quotes for a phrase. Case-insensitive." },
+    area: { type: "string", optional: true, description: 'Notes area: "daily" (everyday notes) or "organized" (cleaned-up notes). Omit for both.' },
+    group: { type: "string", optional: true, description: "Folder path; includes its subfolders." },
+    updatedAfter: { type: "string", optional: true, description: "Only notes updated at or after this instant: ISO date (2026-11-11 = local midnight), ISO date-time, or epoch milliseconds." },
+    updatedBefore: { type: "string", optional: true, description: "Only notes updated before this instant (same formats)." },
+    createdAfter: { type: "string", optional: true, description: "Only notes created at or after this instant (same formats)." },
+    createdBefore: { type: "string", optional: true, description: "Only notes created before this instant (same formats)." },
+    limit: { type: "number", optional: true, description: "Maximum notes to return; default 20, cap 50." },
+  },
+  "vault.note.move": {
+    noteIds: { type: "string", description: "JSON array of note IDs to move." },
+    area: { type: "string", description: 'Target area: "daily" or "organized".' },
+    group: { type: "string", optional: true, allowEmpty: true, description: "Optional target folder path for every moved note. Empty string clears the folder. Omit to keep each note's folder." },
+  },
+  "vault.note.markOrganized": {
+    noteIds: { type: "string", description: "JSON array of daily-area note IDs that have been written up." },
+    organizedNoteId: { type: "string", optional: true, description: "The organized-area note they were written into; links both ways." },
+    undo: { type: "string", optional: true, description: "\"true\" removes the organized mark from these notes instead." },
+  },
   "vault.note.get": {
     noteId: { type: "string", description: "Vault note ID from vault_notes_list." },
     offset: { type: "number", optional: true, description: "Zero-based UTF-16 offset; default 0. Continue with returned nextOffset." },
@@ -180,6 +215,8 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     group: { type: "string", optional: true, description: "Optional folder path (e.g. infra/prod)." },
     linkedHostIds: { type: "string", optional: true, description: "Optional JSON array of vault host IDs to link." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
+    area: { type: "string", optional: true, description: 'Area for the new note: "daily" (default) or "organized".' },
+    organizedFrom: { type: "string", optional: true, description: "JSON array of daily note IDs this organized note was written from. Requires area=organized; marks those notes as organized (their text is kept)." },
   },
   "vault.note.update": {
     noteId: { type: "string", description: "Vault note ID to update." },

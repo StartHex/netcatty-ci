@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { FolderPlus, Plus, Trash2, Waypoints } from 'lucide-react';
+import { Copy, FolderPlus, Plus, Trash2, Waypoints } from 'lucide-react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { curlTabStore } from '../../application/state/curlTabStore';
@@ -9,6 +9,7 @@ import {
   curlFolderIsWithin,
   curlFolderJoin,
   curlFolderParentPath,
+  duplicateCurlRequest,
   removeCurlFolderSubtree,
   reparentCurlFolderPath,
   rewriteCurlFolders,
@@ -21,7 +22,12 @@ import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ScrollArea } from '../ui/scroll-area';
-import { VaultHeaderSearch, VaultPageHeader, vaultHeaderSecondaryButtonClass } from '../vault/VaultPageHeader';
+import {
+  VaultHeaderSearch,
+  VaultPageHeader,
+  vaultHeaderSecondaryButtonClass,
+  vaultSectionTitleClass,
+} from '../vault/VaultPageHeader';
 import { CURL_METHOD_CLASS, CurlFolderTree } from './CurlFolderTree';
 
 export const CurlCollections: React.FC<{
@@ -137,6 +143,17 @@ export const CurlCollections: React.FC<{
     );
   };
 
+  const duplicateRequest = (request: CurlRequest) => {
+    const id = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const next = duplicateCurlRequest(requests ?? [], request.id, {
+      id,
+      copyLabel: t('curl.requestCopyLabel'),
+    });
+    if (next === requests) return;
+    void onUpdateRequests(next);
+    expandFolder(request.folder);
+  };
+
   const moveRequest = (requestId: string, folder: string | undefined) => {
     const target = sanitizeCurlFolderPath(folder);
     const current = (requests ?? []).find((request) => request.id === requestId);
@@ -171,47 +188,57 @@ export const CurlCollections: React.FC<{
   return (
     <div className="flex h-full flex-col">
       <VaultPageHeader>
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <h2 className="truncate text-sm font-semibold">{t('curl.title')}</h2>
-          <span className="text-xs text-muted-foreground">{t('curl.count', { count: String((requests ?? []).length) })}</span>
-        </div>
-        <VaultHeaderSearch
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={t('curl.searchPlaceholder')}
-          className="w-[240px]"
-        />
-        {onUpdateFolders ? (
-          <Button
-            className={cn(vaultHeaderSecondaryButtonClass, 'h-9 gap-1')}
-            onClick={() => startCreateFolder(undefined)}
-          >
-            <FolderPlus size={14} /> {t('curl.newFolder')}
-          </Button>
-        ) : null}
         <Button
-          className={cn(vaultHeaderSecondaryButtonClass, 'h-9 gap-1')}
+          variant="secondary"
+          className={vaultHeaderSecondaryButtonClass}
           onClick={() => curlTabStore.requestOpen(undefined)}
         >
-          <Plus size={14} /> {t('curl.newRequest')}
+          <Plus size={14} />
+          {t('curl.newRequest')}
         </Button>
+        {onUpdateFolders ? (
+          <Button
+            variant="secondary"
+            className={vaultHeaderSecondaryButtonClass}
+            onClick={() => startCreateFolder(undefined)}
+          >
+            <FolderPlus size={14} />
+            {t('curl.newFolder')}
+          </Button>
+        ) : null}
+        <div className="ml-auto flex min-w-0 flex-shrink items-center gap-2">
+          <VaultHeaderSearch
+            aria-label={t('curl.searchPlaceholder')}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t('curl.searchPlaceholder')}
+            className="w-64 flex-shrink"
+          />
+        </div>
       </VaultPageHeader>
 
       <ScrollArea className="min-h-0 flex-1">
+        <div className="flex items-center justify-between px-3 pb-2 pt-3">
+          <h2 className={vaultSectionTitleClass}>{t('curl.title')}</h2>
+          <span className="text-xs text-muted-foreground">
+            {t('curl.count', { count: String((requests ?? []).length) })}
+          </span>
+        </div>
         {showEmpty ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-secondary">
-              <Waypoints className="h-6 w-6 text-muted-foreground" />
+          <div className="flex h-64 flex-col items-center justify-center px-6 text-muted-foreground">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-secondary/80">
+              <Waypoints size={32} className="opacity-60" />
             </div>
-            <div>
-              <p className="text-sm font-medium">{isSearching ? t('curl.emptySearch') : t('curl.empty')}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {isSearching ? t('curl.emptySearchHint') : t('curl.emptyHint')}
-              </p>
-            </div>
+            <h3 className="mb-2 text-lg font-semibold text-foreground">
+              {isSearching ? t('curl.emptySearch') : t('curl.empty')}
+            </h3>
+            <p className="mb-4 max-w-sm text-center text-sm">
+              {isSearching ? t('curl.emptySearchHint') : t('curl.emptyHint')}
+            </p>
             {isSearching ? null : (
-              <Button size="sm" className="gap-1" onClick={() => curlTabStore.requestOpen(undefined)}>
-                <Plus size={14} /> {t('curl.newRequest')}
+              <Button onClick={() => curlTabStore.requestOpen(undefined)}>
+                <Plus size={14} className="mr-2" />
+                {t('curl.newRequest')}
               </Button>
             )}
           </div>
@@ -242,6 +269,16 @@ export const CurlCollections: React.FC<{
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 opacity-0 group-hover:opacity-100"
+                  aria-label={t('curl.requestDuplicate')}
+                  title={t('curl.requestDuplicate')}
+                  onClick={() => duplicateRequest(request)}
+                >
+                  <Copy size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 opacity-0 group-hover:opacity-100"
                   aria-label={t('curl.delete')}
                   onClick={() => setPendingDelete(request)}
                 >
@@ -266,6 +303,7 @@ export const CurlCollections: React.FC<{
             onMoveFolder={moveFolder}
             onOpenRequest={openRequest}
             onDeleteRequest={setPendingDelete}
+            onDuplicateRequest={duplicateRequest}
           />
         )}
       </ScrollArea>

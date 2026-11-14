@@ -1,7 +1,11 @@
 import React, { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useActiveTabId, useIsSftpActive, useIsVaultActive } from '../state/activeTabStore';
+import { activeTabStore, useActiveTabId, useIsSftpActive, useIsVaultActive } from '../state/activeTabStore';
+
+const activeTabStoreSetActive = (tabId: string) => activeTabStore.setActiveTabId(tabId);
 import { fromDatabaseTabId, isDatabaseTabId } from '../state/databaseTabStore';
 import { fromCurlTabId, isCurlTabId } from '../state/curlTabStore';
+import { fromNoteTabId, isNoteTabId, noteTabStore, useNoteTabIds } from '../state/noteTabStore';
+import { useNotesStore } from '../state/notesStore';
 import { useTerminalHostTreeLayoutWidth } from '../state/terminalHostTreeStore';
 import { isTerminalContentTabSurface } from './workTabSurface';
 import { cn } from '../../lib/utils';
@@ -10,7 +14,7 @@ import { LazyLoadBoundary } from '../../components/ui/lazy-load-boundary';
 import type { LogView as LogViewType } from '../state/logViewState';
 import type { SftpView as SftpViewComponent } from '../../components/SftpView';
 import type { TerminalLayer as TerminalLayerComponent } from '../../components/TerminalLayer';
-import type { CurlRequest, DatabaseConnection } from '../../domain/models';
+import type { CurlRequest, DatabaseConnection, Host } from '../../domain/models';
 import type { DatabaseTunnelDeps } from '../state/useDatabaseWorkbench';
 
 // Visibility container for VaultView - isolates isActive subscription
@@ -319,6 +323,70 @@ export const CurlClientMount: React.FC<{
             tabId={isActive ? fromCurlTabId(activeTabId) : null}
             requests={requests}
             onUpdateRequests={onUpdateRequests}
+          />
+        </Suspense>
+      </LazyLoadBoundary>
+    </div>
+  );
+};
+
+const LazyNotesManager = lazy(() =>
+  import('../../components/notes/NotesManager').then((module) => ({ default: module.NotesManager })),
+);
+
+const openNoteInTab = (noteId: string) => noteTabStore.open(noteId);
+
+/**
+ * Body of the note tabs. One editor serves every note tab: the active tab
+ * decides which note it shows. It stays mounted while another tab is active so
+ * returning to a note is instant, and loads only once a note tab exists.
+ */
+export const NoteTabsMount: React.FC<{
+  hosts: Host[];
+  onOpenHost?: (host: Host) => void;
+}> = ({ hosts, onOpenHost }) => {
+  const activeTabId = useActiveTabId();
+  const noteTabIds = useNoteTabIds();
+  const isActive = isNoteTabId(activeTabId);
+  const hostTreeLayoutWidth = useTerminalHostTreeLayoutWidth();
+  const containerStyle = getWorkSurfaceInsetStyle(isActive, hostTreeLayoutWidth);
+  // Keep showing the last note while another tab is in front.
+  const pinnedRef = useRef<string | null>(null);
+  if (isActive) pinnedRef.current = fromNoteTabId(activeTabId);
+  const { notes, noteGroups, updateNotes, updateNoteGroups } = useNotesStore({ enabled: isActive });
+
+  // A note deleted here, in the vault or by a sync takes its tab with it.
+  useEffect(() => {
+    if (!isActive || notes.length === 0) return;
+    const gone = noteTabStore.prune(new Set(notes.map((note) => note.id)));
+    if (gone.includes(fromNoteTabId(activeTabId))) {
+      const remaining = noteTabStore.getNoteIds();
+      activeTabStoreSetActive(remaining.length > 0 ? `note:${remaining[remaining.length - 1]}` : 'vault');
+    }
+  }, [activeTabId, isActive, notes]);
+
+  if (noteTabIds.length === 0) return null;
+
+  return (
+    <div
+      className={cn('absolute inset-0 bg-background', isActive ? 'z-20' : '')}
+      data-inactive-app-surface={isActive ? undefined : 'true'}
+      data-section="note-tab-surface"
+      style={containerStyle}
+    >
+      <LazyLoadBoundary name="Notes" resetKey="note-tabs">
+        <Suspense fallback={null}>
+          <LazyNotesManager
+            notes={notes}
+            noteGroups={noteGroups}
+            hosts={hosts}
+            onUpdateNotes={updateNotes}
+            onUpdateNoteGroups={updateNoteGroups}
+            onOpenHost={onOpenHost}
+            displayMode="tab"
+            isActive={isActive}
+            pinnedNoteId={pinnedRef.current}
+            onOpenNoteInTab={openNoteInTab}
           />
         </Suspense>
       </LazyLoadBoundary>

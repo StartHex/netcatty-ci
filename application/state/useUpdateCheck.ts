@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { FORK_RELEASES_URL } from '../../infrastructure/config/forkRelease';
 import { checkForUpdates, getReleaseUrl, type ReleaseInfo, type UpdateCheckResult } from '../../infrastructure/services/updateService';
 import { localStorageAdapter } from '../../infrastructure/persistence/localStorageAdapter';
 import { STORAGE_KEY_UPDATE_DISMISSED_VERSION, STORAGE_KEY_UPDATE_LAST_CHECK, STORAGE_KEY_UPDATE_LATEST_RELEASE, STORAGE_KEY_AUTO_UPDATE_ENABLED, STORAGE_KEY_DEBUG_UPDATE_DEMO } from '../../infrastructure/config/storageKeys';
@@ -318,7 +319,7 @@ export function useUpdateCheck(options?: { autoUpdateEnabled?: boolean; enabled?
             tagName: 'v1.0.0',
             name: 'Netcatty v1.0.0',
             body: 'Demo release for testing update notification',
-            htmlUrl: 'https://github.com/binaricat/Netcatty/releases',
+            htmlUrl: FORK_RELEASES_URL,
             publishedAt: new Date().toISOString(),
             assets: [],
           },

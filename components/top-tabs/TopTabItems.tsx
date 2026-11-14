@@ -1,8 +1,10 @@
 import { Copy, Database, FileCode, FileText, LayoutGrid, Minus, Server, Square, SquareArrowOutUpRight, Terminal, TerminalSquare, Usb, Waypoints, X } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { activeTabStore, useActiveTabId, useIsTabActive } from '../../application/state/activeTabStore';
-import { toDatabaseTabId, type DatabaseTabSummary } from '../../application/state/databaseTabStore';
-import { toCurlTabId, type CurlTabSummary } from '../../application/state/curlTabStore';
+import { databaseTabStore, toDatabaseTabId, type DatabaseTabSummary } from '../../application/state/databaseTabStore';
+import { curlTabStore, toCurlTabId, type CurlTabSummary } from '../../application/state/curlTabStore';
+import { toNoteTabId } from '../../application/state/noteTabStore';
+import type { NoteTabChrome } from '../../application/state/noteTabChrome';
 import {
   useAnySessionActivity,
   useSessionActivity,
@@ -14,6 +16,7 @@ import {
 } from '../../application/state/editorTabStore';
 import type { LogView } from '../../application/state/logViewState';
 import { useWindowControls } from '../../application/state/useWindowControls';
+import { useShortcutModifierHeldValue } from '../../application/state/useShortcutModifierHeld';
 import { terminalReconnectRegistry } from '../../application/state/terminalReconnectRegistry';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { getEffectiveHostDistro } from '../../domain/host';
@@ -360,6 +363,19 @@ export const TabShortcutNumberBadge: React.FC<{ number: number }> = memo(({ numb
 ));
 TabShortcutNumberBadge.displayName = 'TabShortcutNumberBadge';
 
+/**
+ * A tab's icon, swapped for its [1...9] shortcut number while the switch
+ * modifier is held. Only this slot subscribes to the modifier store.
+ */
+export const TabIconSlot: React.FC<{ shortcutNumber?: number; children: React.ReactNode }> = ({
+  shortcutNumber,
+  children,
+}) => {
+  const held = useShortcutModifierHeldValue();
+  if (shortcutNumber != null && held) return <TabShortcutNumberBadge number={shortcutNumber} />;
+  return <>{children}</>;
+};
+
 const TOP_TAB_COMFORT_EDGE_RATIO = 0.22;
 const TOP_TAB_COMFORT_EDGE_MIN = 72;
 const TOP_TAB_COMFORT_EDGE_MAX = 160;
@@ -471,7 +487,7 @@ export const RootTopTab: React.FC<RootTopTabProps> = memo(({ tabId, label, icon,
         if (!isActive) clearInactiveTopTabHover(e.currentTarget);
       }}
     >
-      {shortcutNumber != null ? <TabShortcutNumberBadge number={shortcutNumber} /> : icon}
+      <TabIconSlot shortcutNumber={shortcutNumber}>{icon}</TabIconSlot>
       <span className={cn('top-tab-root-label', compact && 'top-tab-root-label-compact')}>
         {label}
       </span>
@@ -566,9 +582,7 @@ export const PluginViewTopTab: React.FC<PluginViewTopTabProps> = memo(({
           {showDropIndicatorBefore && isDraggingForReorder && <div className="absolute -left-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
           {showDropIndicatorAfter && isDraggingForReorder && <div className="absolute -right-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            {shortcutNumber != null
-              ? <TabShortcutNumberBadge number={shortcutNumber} />
-              : <PluginContributionIcon pluginId={tab.pluginId} icon={tab.icon} className="shrink-0" />}
+            <TabIconSlot shortcutNumber={shortcutNumber}><PluginContributionIcon pluginId={tab.pluginId} icon={tab.icon} className="shrink-0" /></TabIconSlot>
             <span className="truncate leading-5">{tab.title}</span>
           </div>
           <button onMouseDown={handleTabCloseButtonMouseDown} onClick={close} className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted" aria-label={t('tabs.closePluginViewAria', { title: tab.title })}><X size={12} /></button>
@@ -637,6 +651,9 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
     event?.stopPropagation();
     onClose(tab.id);
   }, [onClose, tab.id]);
+  const duplicate = useCallback(() => {
+    databaseTabStore.requestDuplicate(tab.id);
+  }, [tab.id]);
   const busy = tab.status === 'connecting';
   const dotClass =
     tab.status === 'ready'
@@ -653,6 +670,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
       data-state={isActive ? 'active' : 'inactive'}
       data-active={topTabActiveValue(isActive)}
       onClick={activate}
+      onDoubleClick={duplicate}
       onMouseDown={handleTabDragThresholdMouseDown}
       onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
       onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
@@ -695,6 +713,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
       <button
         onMouseDown={handleTabCloseButtonMouseDown}
         onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
         className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
         aria-label={t('tabs.closeDatabaseAria', { title: tab.title })}
       >
@@ -711,6 +730,7 @@ export const DatabaseTopTab: React.FC<DatabaseTopTabProps> = memo(({
         <TooltipContent>{tab.title}</TooltipContent>
       </Tooltip>
       <ContextMenuContent>
+        <ContextMenuItem onClick={duplicate}>{t('tabs.copyTab')}</ContextMenuItem>
         <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
         {renderBulkCloseItems(tabId)}
       </ContextMenuContent>
@@ -765,6 +785,9 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
     event?.stopPropagation();
     onClose(tab.id);
   }, [onClose, tab.id]);
+  const duplicate = useCallback(() => {
+    curlTabStore.requestDuplicate(tab.id);
+  }, [tab.id]);
   const busy = tab.status === 'sending';
   const dotClass =
     tab.status === 'done'
@@ -781,6 +804,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
       data-state={isActive ? 'active' : 'inactive'}
       data-active={topTabActiveValue(isActive)}
       onClick={activate}
+      onDoubleClick={duplicate}
       onMouseDown={handleTabDragThresholdMouseDown}
       onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
       onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
@@ -824,6 +848,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
       <button
         onMouseDown={handleTabCloseButtonMouseDown}
         onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
         className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
         aria-label={t('tabs.closeCurlAria', { title: tab.title })}
       >
@@ -840,6 +865,7 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
         <TooltipContent>{tab.title}</TooltipContent>
       </Tooltip>
       <ContextMenuContent>
+        <ContextMenuItem onClick={duplicate}>{t('tabs.copyTab')}</ContextMenuItem>
         <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
         {renderBulkCloseItems(tabId)}
       </ContextMenuContent>
@@ -847,6 +873,129 @@ export const CurlTopTab: React.FC<CurlTopTabProps> = memo(({
   );
 });
 CurlTopTab.displayName = 'CurlTopTab';
+
+export type { NoteTabChrome };
+
+interface NoteTopTabProps {
+  /** `id` is the note id. */
+  tab: NoteTabChrome;
+  onClose: (noteId: string) => void;
+  renderBulkCloseItems: RenderBulkCloseItems;
+  t: TranslateFn;
+  isBeingDragged: boolean;
+  isDraggingForReorder: boolean;
+  shiftStyle: React.CSSProperties;
+  showDropIndicatorBefore: boolean;
+  showDropIndicatorAfter: boolean;
+  onTabDragStart: (e: React.DragEvent, tabId: string) => void;
+  onTabDragEnd: () => void;
+  onTabDragOver: (e: React.DragEvent, tabId: string) => void;
+  onTabDragLeave: (e: React.DragEvent) => void;
+  onTabDrop: (e: React.DragEvent, targetTabId: string) => void;
+  tabAnimationClass?: string;
+  shortcutNumber?: number;
+}
+
+export const NoteTopTab: React.FC<NoteTopTabProps> = memo(({
+  tab,
+  onClose,
+  renderBulkCloseItems,
+  t,
+  isBeingDragged,
+  isDraggingForReorder,
+  shiftStyle,
+  showDropIndicatorBefore,
+  showDropIndicatorAfter,
+  onTabDragStart,
+  onTabDragEnd,
+  onTabDragOver,
+  onTabDragLeave,
+  onTabDrop,
+  tabAnimationClass,
+  shortcutNumber,
+}) => {
+  const tabId = toNoteTabId(tab.id);
+  const title = tab.title || t('notes.title.placeholder');
+  const isActive = useIsTabActive(tabId);
+  const activate = useCallback(() => {
+    activeTabStore.setActiveTabId(tabId);
+  }, [tabId]);
+  const close = useCallback((event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    onClose(tab.id);
+  }, [onClose, tab.id]);
+  const tabBody = (
+    <div
+      data-tab-id={tabId}
+      data-tab-type="note"
+      data-state={isActive ? 'active' : 'inactive'}
+      data-active={topTabActiveValue(isActive)}
+      onClick={activate}
+      onMouseDown={handleTabDragThresholdMouseDown}
+      onMouseUp={(event) => handleTabDragThresholdRelease(event, activate)}
+      onAuxClick={(event) => handleTabMiddleClickClose(event, close)}
+      draggable
+      onDragStart={(event) => {
+        handleTabDragThresholdDragStart(event);
+        onTabDragStart(event, tabId);
+      }}
+      onDrag={(event) => {
+        if (!handleTabDragThresholdDrag(event)) return;
+        onTabDragStart(event, tabId);
+      }}
+      onDragEnd={(event) => {
+        handleTabDragThresholdRelease(event, activate);
+        onTabDragEnd();
+      }}
+      onDragOver={(event) => onTabDragOver(event, tabId)}
+      onDragLeave={onTabDragLeave}
+      onDrop={(event) => onTabDrop(event, tabId)}
+      className={cn(
+        TOP_TAB_ITEM_CLASS,
+        'netcatty-tab relative h-7 min-w-[140px] max-w-[240px] flex-shrink-0 cursor-pointer items-center justify-between gap-2 overflow-hidden rounded-t-md pl-3 pr-2 text-xs font-semibold app-no-drag',
+        'flex transition-transform duration-150',
+        isBeingDragged && isDraggingForReorder && 'scale-95 opacity-40',
+        tabAnimationClass,
+      )}
+      style={{ ...shiftStyle, ...resolveTopTabChromeStyle(isActive) } as React.CSSProperties}
+    >
+      {showDropIndicatorBefore && isDraggingForReorder && <div className="absolute -left-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+      {showDropIndicatorAfter && isDraggingForReorder && <div className="absolute -right-0.5 bottom-1 top-1 w-0.5 rounded-full bg-primary" />}
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        {shortcutNumber != null ? (
+          <TabShortcutNumberBadge number={shortcutNumber} />
+        ) : (
+          <FileText size={12} className="shrink-0 text-muted-foreground" />
+        )}
+        <span className="truncate leading-5">{title}</span>
+      </div>
+      <button
+        onMouseDown={handleTabCloseButtonMouseDown}
+        onClick={close}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
+        aria-label={t('tabs.closeNoteAria', { title })}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+  return (
+    <ContextMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ContextMenuTrigger asChild>{tabBody}</ContextMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{title}</TooltipContent>
+      </Tooltip>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => onClose(tab.id)}>{t('common.close')}</ContextMenuItem>
+        {renderBulkCloseItems(tabId)}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+});
+NoteTopTab.displayName = 'NoteTopTab';
 
 interface EditorTopTabProps {
   tabId: string;
@@ -971,15 +1120,13 @@ export const EditorTopTab: React.FC<EditorTopTabProps> = memo(({
             />
           )}
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            {shortcutNumber != null ? (
-              <TabShortcutNumberBadge number={shortcutNumber} />
-            ) : (
+            <TabIconSlot shortcutNumber={shortcutNumber}>
               <FileIcon
                 size={14}
                 className="shrink-0"
                 style={{ color: isActive ? 'var(--top-tabs-accent, hsl(var(--accent)))' : 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
               />
-            )}
+            </TabIconSlot>
             <span className="flex items-center gap-0.5 truncate leading-5">
               {dirty && <span className="mr-0.5 text-primary">●</span>}
               {editorTab.fileName}
@@ -1159,9 +1306,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
         />
       )}
       <div className="flex items-center gap-2 min-w-0 flex-1">
-        {shortcutNumber != null ? (
-          <TabShortcutNumberBadge number={shortcutNumber} />
-        ) : (
+        <TabIconSlot shortcutNumber={shortcutNumber}>
           <SessionTabIcon
             host={host}
             session={session}
@@ -1170,7 +1315,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
             shellIcon={session.localShellIcon}
             dynamicTabTitleMode={dynamicTabTitleMode}
           />
-        )}
+        </TabIconSlot>
         <span className="truncate leading-5">{tabTitle}</span>
         <div className="flex-shrink-0">{sessionStatusDot(session.status, hasActivity)}</div>
       </div>
@@ -1376,15 +1521,13 @@ export const WorkspaceTopTab: React.FC<WorkspaceTopTabProps> = memo(({
             />
           )}
           <div className="flex items-center gap-2 truncate">
-            {shortcutNumber != null ? (
-              <TabShortcutNumberBadge number={shortcutNumber} />
-            ) : (
+            <TabIconSlot shortcutNumber={shortcutNumber}>
               <LayoutGrid
                 size={14}
                 className="shrink-0"
                 style={{ color: isActive ? 'var(--top-tabs-accent, hsl(var(--accent)))' : 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
               />
-            )}
+            </TabIconSlot>
             <span className="truncate leading-5" title={tabLabel}>{tabLabel}</span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -1533,15 +1676,13 @@ export const LogViewTopTab: React.FC<LogViewTopTabProps> = memo(({
         />
       )}
       <div className="flex items-center gap-2 min-w-0 flex-1">
-        {shortcutNumber != null ? (
-          <TabShortcutNumberBadge number={shortcutNumber} />
-        ) : (
+        <TabIconSlot shortcutNumber={shortcutNumber}>
           <FileText
             size={14}
             className="shrink-0"
             style={{ color: isActive ? 'var(--top-tabs-accent, hsl(var(--accent)))' : 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}
           />
-        )}
+        </TabIconSlot>
         <span className="truncate leading-5">
           {t('tabs.logPrefix')} {isLocal ? t('tabs.logLocal') : logView.log.hostname}
         </span>

@@ -8,6 +8,8 @@ export {
   shouldInsertClipboardTextAsMarkdown,
   looksLikeClipboardHtml,
   plainMarkdownContainsHtml,
+  plainTextContainsCompleteHtmlTag,
+  escapeStrayAngleBrackets,
   isPrimarilyHtmlDocument,
   isCenteredBlockElement,
   htmlOpenTagIsCentered,
@@ -27,5 +29,9 @@ export {
   extractBalancedHtmlElement,
   convertHtmlIslandsInMarkdown,
   resolveNoteClipboardPaste,
+  preserveMarkdownLineBreaks,
+  conversionLostLineBreaks,
+  splitPlainTextForNoteInsert,
+  shouldInsertPlainNotePasteWithLineBreaks,
   shouldInterceptResolvedNotePaste,
 } from "../../domain/notes/clipboardPaste";

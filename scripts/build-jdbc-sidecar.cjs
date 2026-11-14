@@ -4,7 +4,8 @@
  *
  * The jar is a build artifact (not committed). When no JDK is present the step
  * degrades to a warning: the app then ships without JDBC support instead of
- * failing the whole packaging run.
+ * failing the whole packaging run. Set NETCATTY_REQUIRE_JDBC_SIDECAR=1 to make a
+ * missing JDK an error instead (the packaging workflows do).
  */
 
 const fs = require("node:fs");
@@ -78,6 +79,12 @@ function main() {
   const javac = findJdkTool("javac");
   const jar = findJdkTool("jar");
   if (!javac || !jar) {
+    // Release pipelines set this: a package without the jar looks fine until
+    // someone opens a JDBC connection and is told a file is missing.
+    if (process.env.NETCATTY_REQUIRE_JDBC_SIDECAR === "1") {
+      console.error("[jdbc-sidecar] javac/jar not found and NETCATTY_REQUIRE_JDBC_SIDECAR=1: install a JDK (17 or newer) on the build machine");
+      process.exit(1);
+    }
     console.warn("[jdbc-sidecar] javac/jar not found — JDBC support will be unavailable in this build");
     return;
   }

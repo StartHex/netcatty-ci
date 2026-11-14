@@ -42,6 +42,8 @@ const PLACEHOLDER_KEYS: Record<string, string[]> = {
   "databases.workbench.previewChars": ["{count}"],
   "databases.workbench.statementProgress": ["{index}", "{total}"],
   "databases.workbench.exportFailed": ["{error}"],
+  "databases.testingElapsed": ["{seconds}"],
+  "databases.workbench.runningElapsed": ["{seconds}"],
 };
 
 test("database messages exist in every bundled locale", () => {

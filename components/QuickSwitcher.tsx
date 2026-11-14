@@ -7,6 +7,8 @@ import {
   Minimize2,
   Plus,
   Search,
+  FileText,
+  ShieldCheck,
   Terminal,
   TerminalSquare,
   Waypoints,
@@ -20,9 +22,12 @@ import type { PaneMagnificationState } from "../domain/paneMagnification";
 import { isSwitcherQuickConnectInput } from "../domain/quickConnect";
 import { matchesSearchQuery } from "../lib/searchMatcher";
 import { buildQuickSwitcherShells, useDiscoveredShells, getShellIconPath, isMonochromeShellIcon } from "../lib/useDiscoveredShells";
+import { useNotesStore } from "../application/state/notesStore";
+import { noteTabStore } from "../application/state/noteTabStore";
 import { usePluginContributions } from "../application/state/usePluginContributions";
 import { requestOpenPluginView } from "./plugins/PluginContributionHost";
 import { PluginContributionIcon } from "./plugins/PluginContributionIcon";
+import { toast } from "./ui/toast";
 
 type QuickSwitcherItemBase = {
   id: string;
@@ -39,7 +44,7 @@ type QuickSwitcherItemBase = {
 
 type QuickSwitcherItem = QuickSwitcherItemBase & (
   | { type: "plugin-command"; commandId: string }
-  | { type: "host" | "tab" | "workspace" | "action" | "shell" | "plugin-view" | "quick-connect" | "database-tab" | "database" | "curl-tab" | "curl"; commandId?: never }
+  | { type: "host" | "tab" | "workspace" | "action" | "shell" | "plugin-view" | "quick-connect" | "database-tab" | "database" | "curl-tab" | "curl" | "note"; commandId?: never }
 );
 
 export function buildPaneMagnificationPaletteAction(
@@ -132,6 +137,9 @@ import { clampListIndex, stepListIndex } from "./ui/virtualListMath";
 
 // Compute once at module level
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+const IS_WINDOWS = typeof navigator !== 'undefined' && /Win/.test(navigator.platform);
+/** Shells offered with a one-click "as administrator" button on Windows. */
+const WINDOWS_ADMIN_SHELL_IDS = new Set(['cmd', 'powershell', 'pwsh']);
 
 const QS_ROW_HEIGHT = 44;
 /** Two-line plugin command/view rows (title + subtitle + py-2.5) need a taller slot. */
@@ -151,7 +159,7 @@ export function getQuickSwitcherVisualRowHeight(row: QuickSwitcherVisualRow): nu
   return QS_ROW_HEIGHT;
 }
 
-interface QuickSwitcherProps {
+export interface QuickSwitcherProps {
   isOpen: boolean;
   query: string;
   results: Host[];
@@ -172,7 +180,7 @@ interface QuickSwitcherProps {
   onEditHost?: (host: Host) => void;
   onSelectTab: (tabId: string) => void;
   onClose: () => void;
-  onCreateLocalTerminal?: (shell?: { command: string; args?: string[]; name?: string; icon?: string }) => void;
+  onCreateLocalTerminal?: (shell?: { command: string; args?: string[]; name?: string; icon?: string; elevated?: boolean }) => void;
   onCreateWorkspace?: () => void;
   keyBindings?: KeyBinding[];
   showSftpTab: boolean;
@@ -327,6 +335,15 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     return curlTabs.filter((tab) => matchesSearchQuery(trimmedQuery, tab.title, tab.subtitle ?? '', 'curl'));
   }, [curlTabs, trimmedQuery]);
 
+  // Notes are searched by title; picking one opens it in its own tab.
+  const { notes: vaultNotes } = useNotesStore();
+  const filteredNotes = useMemo(() => {
+    if (!trimmedQuery) return [];
+    return vaultNotes
+      .filter((note) => matchesSearchQuery(trimmedQuery, note.title, note.group ?? '', 'note'))
+      .slice(0, 20);
+  }, [trimmedQuery, vaultNotes]);
+
   const filteredCurlRequests = useMemo(() => {
     if (!trimmedQuery) return [];
     return curlRequests.filter((request) =>
@@ -399,7 +416,8 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
       || filteredDatabaseTabs.length > 0
       || filteredDatabaseConnections.length > 0
       || filteredCurlTabs.length > 0
-      || filteredCurlRequests.length > 0;
+      || filteredCurlRequests.length > 0
+      || filteredNotes.length > 0;
 
     // The address row is the default Enter target only when nothing else matches.
     // Matching hosts and open tabs stay ahead of it.
@@ -445,6 +463,14 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
           altCommand: request.subtitle,
         }),
       );
+      filteredNotes.forEach((note) =>
+        pushItem({
+          type: "note",
+          id: note.id,
+          title: note.title || t("notes.title.placeholder"),
+          altCommand: note.group || undefined,
+        }),
+      );
       filteredOrphanSessions.forEach((s) =>
         pushItem({ type: "tab", id: s.id, data: s }),
       );
@@ -484,6 +510,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
     filteredDatabaseConnections,
     filteredDatabaseTabs,
     filteredCurlRequests,
+    filteredNotes,
     filteredCurlTabs,
     filteredOrphanSessions,
     filteredShells,
@@ -564,6 +591,10 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
         onOpenCurlRequest?.(item.id);
         onClose();
         break;
+      case "note":
+        noteTabStore.open(item.id);
+        onClose();
+        break;
       case "tab":
       case "workspace":
         onSelectTab(item.id);
@@ -595,7 +626,7 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
             useAlternate && item.altCommand ? item.altCommand : item.commandId,
             undefined,
             { 'netcatty.surface': 'commandPalette' },
-          ).catch(() => {});
+          ).catch(() => toast.error(t('plugins.command.failed')));
           onClose();
         }
         break;
@@ -827,6 +858,28 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                 );
               }
 
+              if (item.type === "note") {
+                return (
+                  <div
+                    className={rowClass}
+                    onClick={() => {
+                      noteTabStore.open(item.id);
+                      onClose();
+                    }}
+                  >
+                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground">
+                      <FileText size={16} />
+                    </div>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                      {item.title ?? item.id}
+                    </span>
+                    {item.altCommand ? (
+                      <span className="shrink-0 truncate text-xs text-muted-foreground">{item.altCommand}</span>
+                    ) : null}
+                  </div>
+                );
+              }
+
               if (item.type === "workspace") {
                 const workspace = item.data as Workspace | undefined;
                 return (
@@ -875,6 +928,28 @@ const QuickSwitcherInner: React.FC<QuickSwitcherProps> = ({
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                         {t("qs.default")}
                       </span>
+                    )}
+                    {IS_WINDOWS && WINDOWS_ADMIN_SHELL_IDS.has(shell.id) && onCreateLocalTerminal && (
+                      <button
+                        type="button"
+                        className="ml-auto flex shrink-0 items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        title={t("qs.shellAsAdmin")}
+                        data-qs-shell-admin={shell.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCreateLocalTerminal({
+                            command: shell.command,
+                            args: shell.args,
+                            name: t("qs.shellAdminName", { name: shell.name }),
+                            icon: shell.icon,
+                            elevated: true,
+                          });
+                          onClose();
+                        }}
+                      >
+                        <ShieldCheck size={12} />
+                        {t("qs.shellAsAdminShort")}
+                      </button>
                     )}
                   </div>
                 );

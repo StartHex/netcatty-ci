@@ -48,7 +48,9 @@ function extractBundledJar(jarInsideAsar) {
         return null;
       }
     })();
-    if (!existing || existing.length !== source.length) fs.writeFileSync(target, source);
+    // Compare the bytes, not the size: a jar rebuilt from changed sources is
+    // often the same length, and a stale copy would keep running old code.
+    if (!existing || !existing.equals(source)) fs.writeFileSync(target, source);
     return target;
   } catch {
     return undefined;
@@ -111,6 +113,11 @@ function resolveSidecarJar(options = {}) {
   return undefined;
 }
 
+/** How long the JVM gets to print READY. */
+const SIDECAR_START_TIMEOUT_MS = 15000;
+/** A graceful SHUTDOWN queues behind a running statement; do not wait for it forever. */
+const SIDECAR_SHUTDOWN_TIMEOUT_MS = 1500;
+
 class JdbcSidecar {
   constructor(options = {}) {
     this.options = options;
@@ -120,10 +127,13 @@ class JdbcSidecar {
     this.pending = new Map();
     this.ready = null;
     this.java = null;
+    this.starting = null;
+    this.startTimer = null;
   }
 
   async start() {
-    if (this.child) return { ok: true, java: this.java };
+    if (this.child && !this.starting) return { ok: true, java: this.java };
+    if (this.starting) return this.starting;
     this.java = resolveJava(this.options);
     if (!this.java.ok) return { ok: false, code: "java-not-found", error: this.java.error };
     const jar = resolveSidecarJar(this.options);
@@ -137,29 +147,63 @@ class JdbcSidecar {
     // The JVM is an opaque black box: keep a crash report on disk and stop
     // mis-decoding non-UTF8 driver messages.
     const errorFile = path.join(os.tmpdir(), `nc-jdbc-hs_err_${process.pid}_%p.log`);
-    this.child = spawn(
-      this.java.path,
-      ["-Dfile.encoding=UTF-8", `-XX:ErrorFile=${errorFile}`, "-jar", jar],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      },
-    );
+    let child;
+    try {
+      child = spawn(
+        this.java.path,
+        ["-Dfile.encoding=UTF-8", `-XX:ErrorFile=${errorFile}`, "-jar", jar],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        },
+      );
+    } catch (error) {
+      return { ok: false, code: "sidecar-exit", error: `JDBC 进程无法启动：${error?.message || error}` };
+    }
+    this.child = child;
+    this.buffer = "";
     this.errorFilePattern = errorFile;
-    this.child.stdout.setEncoding("utf8");
-    this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => this.onData(chunk));
-    this.child.stderr.on("data", (chunk) => {
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (this.child === child) this.onData(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
       // Keep the tail so a crash (bad class-file version, missing native lib)
       // surfaces the actual JVM message instead of a bare "process exited".
       this.stderrTail = `${this.stderrTail || ""}${chunk}`.slice(-2000);
       if (process.env.NETCATTY_DEBUG_JDBC) process.stderr.write(`[jdbc] ${chunk}`);
     });
-    this.child.on("exit", (code, signal) => this.onExit(code, signal));
-    return new Promise((resolve) => {
-      this.readyResolve = resolve;
-      setTimeout(() => resolve({ ok: false, code: "sidecar-timeout", error: "JDBC 进程启动超时。" }), 15000);
+    // EPIPE on a dead JVM's stdin must not become an uncaught main-process error.
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => {
+      // spawn failures (ENOENT, EACCES) arrive here instead of 'exit'.
+      this.stderrTail = `${this.stderrTail || ""}${error?.message || error}`.slice(-2000);
+      if (this.child === child) this.onExit(null, null);
     });
+    child.on("exit", (code, signal) => {
+      if (this.child === child) this.onExit(code, signal);
+    });
+    this.starting = new Promise((resolve) => {
+      this.readyResolve = (result) => {
+        if (this.startTimer) {
+          clearTimeout(this.startTimer);
+          this.startTimer = null;
+        }
+        this.starting = null;
+        resolve(result);
+      };
+      this.startTimer = setTimeout(() => {
+        this.startTimer = null;
+        const resolveReady = this.readyResolve;
+        this.readyResolve = null;
+        // A JVM that never said READY is useless: kill it so the next start()
+        // spawns a fresh one instead of talking to a hung process.
+        this.kill();
+        resolveReady?.({ ok: false, code: "sidecar-timeout", error: "JDBC 进程启动超时。" });
+      }, SIDECAR_START_TIMEOUT_MS);
+    });
+    return this.starting;
   }
 
   onData(chunk) {
@@ -178,8 +222,9 @@ class JdbcSidecar {
     const id = parts[1];
     if (kind === "READY") {
       if (this.readyResolve) {
-        this.readyResolve({ ok: true, java: this.java });
+        const resolveReady = this.readyResolve;
         this.readyResolve = null;
+        resolveReady({ ok: true, java: this.java });
       }
       return;
     }
@@ -229,43 +274,90 @@ class JdbcSidecar {
     for (const entry of this.pending.values()) entry.resolve(error);
     this.pending.clear();
     if (this.readyResolve) {
-      this.readyResolve({ ok: false, code: "sidecar-exit", error: error.error.message });
+      const resolveReady = this.readyResolve;
       this.readyResolve = null;
+      resolveReady({ ok: false, code: "sidecar-exit", error: error.error.message });
     }
     this.child = null;
+    this.starting = null;
   }
 
   request(method, params = {}) {
-    if (!this.child) return Promise.resolve({ ok: false, error: { message: "JDBC 进程未启动", code: "sidecar-exit" } });
+    const child = this.child;
+    if (!child) return Promise.resolve({ ok: false, error: { message: "JDBC 进程未启动", code: "sidecar-exit" } });
     const id = String(this.nextId++);
     const fields = Object.entries(params)
       .filter(([, value]) => value !== undefined && value !== null)
       .map(([key, value]) => `${key}=${encode(value)}`);
     return new Promise((resolve) => {
       this.pending.set(id, { resolve, rows: [], columns: [] });
-      this.child.stdin.write([id, method, ...fields].join("\t") + "\n");
+      try {
+        child.stdin.write([id, method, ...fields].join("\t") + "\n");
+      } catch (error) {
+        this.pending.delete(id);
+        resolve({ ok: false, error: { message: `JDBC 进程不可用：${error?.message || error}`, code: "sidecar-exit" } });
+      }
     });
   }
 
-  async stop() {
-    if (!this.child) return;
+  /**
+   * Forgets the current process right away: pending requests resolve with
+   * sidecar-exit and the next start() spawns a fresh JVM even if this one is
+   * still shutting down. Its late 'exit' event is ignored.
+   */
+  detach(signal) {
+    const child = this.child;
+    if (!child) return null;
+    this.onExit(null, signal);
+    return child;
+  }
+
+  /** Immediate termination (cancel / forced close). */
+  kill() {
+    const child = this.detach("SIGTERM");
+    if (!child) return;
     try {
-      await this.request("SHUTDOWN");
-    } catch {
-      // ignore shutdown failures
-    }
-    try {
-      this.child.stdin.end();
+      child.kill();
     } catch {
       // ignore
     }
+    const escalate = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }
+    }, 1000);
+    escalate.unref?.();
+  }
+
+  async stop() {
     const child = this.child;
-    this.child = null;
+    if (!child) return;
+    // SHUTDOWN is processed after the running statement, so cap the wait.
+    let timer = null;
+    await Promise.race([
+      this.request("SHUTDOWN").catch(() => undefined),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, SIDECAR_SHUTDOWN_TIMEOUT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    try {
+      child.stdin.end();
+    } catch {
+      // ignore
+    }
+    if (this.child === child) this.detach("SIGTERM");
     setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // ignore
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
       }
     }, 500).unref?.();
   }

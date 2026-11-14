@@ -40,6 +40,7 @@ export interface PersistedCurlTabsState {
 export type CurlTabRequest =
   | { type: 'open'; requestId?: string; nonce: number }
   | { type: 'close'; tabId: string; nonce: number }
+  | { type: 'duplicate'; tabId: string; nonce: number }
   | null;
 
 type Listener = () => void;
@@ -127,6 +128,12 @@ class CurlTabStore {
 
   requestClose = (tabId: string): void => {
     this.request = { type: 'close', tabId, nonce: Date.now() + Math.random() };
+    this.notify();
+  };
+
+  /** Open an unsaved copy of the tab's current draft in a new tab. */
+  requestDuplicate = (tabId: string): void => {
+    this.request = { type: 'duplicate', tabId, nonce: Date.now() + Math.random() };
     this.notify();
   };
 

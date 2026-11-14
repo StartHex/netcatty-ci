@@ -138,3 +138,33 @@ export function cellToText(value: DbCellValue): string {
   if (value === null || value === undefined) return '';
   return String(value);
 }
+
+/**
+ * Picks the match the "previous / next" buttons should land on.
+ *
+ * `positions[i]` is the display position (row number in the current sort
+ * order) of match `i`, ascending. Normally the cursor just steps and wraps.
+ * When the user has paged away from the active match (`page` is given), the
+ * step is taken relative to the page they are looking at instead: "next" goes
+ * to the first match on or after that page, "previous" to the last match on or
+ * before it — so navigation always continues from what is on screen and
+ * always crosses pages.
+ */
+export function stepResultMatchCursor(
+  positions: readonly number[],
+  current: number,
+  delta: 1 | -1,
+  page?: { start: number; end: number } | null,
+): number {
+  const total = positions.length;
+  if (total === 0) return 0;
+  if (!page) return (((current + delta) % total) + total) % total;
+  if (delta > 0) {
+    const index = positions.findIndex((position) => position >= page.start);
+    return index >= 0 ? index : 0;
+  }
+  for (let index = total - 1; index >= 0; index -= 1) {
+    if (positions[index] < page.end) return index;
+  }
+  return total - 1;
+}

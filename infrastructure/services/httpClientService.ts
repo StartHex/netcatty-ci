@@ -52,8 +52,18 @@ function normalizeResponse(value: unknown): CurlResponse | undefined {
 }
 
 export async function sendHttpRequest(wire: CurlWireRequest): Promise<CurlSendResult> {
-  const api = requireHttpBridge();
-  const raw = await api.httpRequest?.({ wire });
+  let raw: unknown;
+  try {
+    const api = requireHttpBridge();
+    raw = await api.httpRequest?.({ wire });
+  } catch (error) {
+    // A missing bridge or a failed IPC round-trip is still a result the UI can
+    // show; throwing here used to leave the tab stuck in "sending".
+    return {
+      ok: false,
+      error: { code: 'unknown', message: error instanceof Error ? error.message : String(error) },
+    };
+  }
   if (!raw || typeof raw !== 'object') {
     return { ok: false, error: { code: 'unknown', message: 'No response from HTTP bridge' } };
   }
@@ -71,7 +81,11 @@ export async function sendHttpRequest(wire: CurlWireRequest): Promise<CurlSendRe
 export async function cancelHttpRequest(requestId: string): Promise<void> {
   const api = bridge();
   if (!api?.httpCancel) return;
-  await api.httpCancel({ requestId });
+  try {
+    await api.httpCancel({ requestId });
+  } catch {
+    // Best effort: the renderer has already stopped waiting for this request.
+  }
 }
 
 const ERROR_MESSAGES: Record<string, string> = {

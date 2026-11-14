@@ -31,6 +31,8 @@ export interface PersistedDatabaseTab {
   connectionId: string;
   title: string;
   sql: string;
+  /** Local .sql file the draft was opened from / saved to. */
+  filePath?: string;
 }
 
 export interface PersistedDatabaseTabsState {
@@ -41,6 +43,7 @@ export interface PersistedDatabaseTabsState {
 export type DatabaseTabRequest =
   | { type: 'open'; connectionId: string; forceNew?: boolean; nonce: number }
   | { type: 'close'; tabId: string; nonce: number }
+  | { type: 'duplicate'; tabId: string; nonce: number }
   | null;
 
 type Listener = () => void;
@@ -138,6 +141,12 @@ class DatabaseTabStore {
 
   requestClose = (tabId: string): void => {
     this.request = { type: 'close', tabId, nonce: Date.now() + Math.random() };
+    this.notify();
+  };
+
+  /** Open a second tab on the same connection carrying the same SQL draft. */
+  requestDuplicate = (tabId: string): void => {
+    this.request = { type: 'duplicate', tabId, nonce: Date.now() + Math.random() };
     this.notify();
   };
 

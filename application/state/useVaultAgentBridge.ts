@@ -16,6 +16,7 @@ import {
   resolveDefaultKeyPassphraseAliases,
 } from '../defaultKeyPassphrases';
 import { getNotesActions, getNotesSnapshot, subscribeNotes } from './notesStore';
+import { readExternalMcpNotesAccess, readExternalMcpNotesMaskSecrets } from './useExternalMcpToggleState';
 import type {
   VaultGroupMutationResult,
   VaultGroupMutationState,
@@ -55,6 +56,8 @@ export interface UseVaultAgentBridgeInput {
   openHost?: VaultAgentApiDeps['openHost'];
   findExistingSessionForHost?: VaultAgentApiDeps['findExistingSessionForHost'];
   closeSession?: VaultAgentApiDeps['closeSession'];
+  reconnectSession?: VaultAgentApiDeps['reconnectSession'];
+  inspectSessionRecovery?: VaultAgentApiDeps['inspectSessionRecovery'];
   getScriptSessionMeta?: (sessionId: string) => Pick<TerminalSession, 'status' | 'customName' | 'hostLabel' | 'hostname' | 'username'> | undefined;
 }
 
@@ -169,6 +172,12 @@ export function useVaultAgentBridge(input: UseVaultAgentBridgeInput): void {
           vaultSnapshotRef.current.notes,
         ),
         getCustomGroups: () => vaultSnapshotRef.current.customGroups,
+        // Read on every call so a change made in the settings window applies
+        // to the very next MCP request.
+        getExternalNotesPolicy: () => ({
+          allowed: readExternalMcpNotesAccess(),
+          maskSecrets: readExternalMcpNotesMaskSecrets(),
+        }),
         getGroupConfigs: () => vaultSnapshotRef.current.groupConfigs,
         getPortForwardingRules: () => vaultSnapshotRef.current.portForwardingRules,
         getManagedSources: () => vaultSnapshotRef.current.managedSources,
@@ -273,6 +282,8 @@ export function useVaultAgentBridge(input: UseVaultAgentBridgeInput): void {
           ? (host, isExternalMcpCall, options) => current.openHost!(host, isExternalMcpCall, options)
           : undefined,
         findExistingSessionForHost: current.findExistingSessionForHost,
+        reconnectSession: current.reconnectSession,
+        inspectSessionRecovery: current.inspectSessionRecovery,
         closeSession: current.closeSession
           ? (sessionId) => current.closeSession!(sessionId)
           : undefined,

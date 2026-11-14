@@ -10,6 +10,8 @@ import {
   STORAGE_KEY_AI_EXTERNAL_MCP_HTTP_PORT,
   STORAGE_KEY_AI_EXTERNAL_MCP_IDLE_TIMEOUT_MINUTES,
   STORAGE_KEY_AI_EXTERNAL_MCP_MODE,
+  STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS,
+  STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS,
   STORAGE_KEY_AI_EXTERNAL_MCP_REDACTION,
   STORAGE_KEY_AI_EXTERNAL_MCP_SILENT_SESSIONS,
   STORAGE_KEY_AI_PERMISSION_MODE,
@@ -343,6 +345,26 @@ export function readExternalMcpFocusOnHostOpen(): boolean {
 export function writeExternalMcpFocusOnHostOpen(focusOnHostOpen: boolean): void {
   localStorageAdapter.writeBoolean(STORAGE_KEY_AI_EXTERNAL_MCP_FOCUS_ON_HOST_OPEN, focusOnHostOpen);
   emitAIStateChanged(STORAGE_KEY_AI_EXTERNAL_MCP_FOCUS_ON_HOST_OPEN);
+}
+
+/** Whether MCP clients may read and organize Vault → Notes. Off by default. */
+export function readExternalMcpNotesAccess(): boolean {
+  return localStorageAdapter.readBoolean(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS) ?? false;
+}
+
+export function writeExternalMcpNotesAccess(allowed: boolean): void {
+  localStorageAdapter.writeBoolean(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS, allowed);
+  emitAIStateChanged(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_ACCESS);
+}
+
+/** Whether note text sent to MCP clients has passwords / tokens hidden. On by default. */
+export function readExternalMcpNotesMaskSecrets(): boolean {
+  return localStorageAdapter.readBoolean(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS) ?? true;
+}
+
+export function writeExternalMcpNotesMaskSecrets(maskSecrets: boolean): void {
+  localStorageAdapter.writeBoolean(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS, maskSecrets);
+  emitAIStateChanged(STORAGE_KEY_AI_EXTERNAL_MCP_NOTES_MASK_SECRETS);
 }
 
 export function normalizeExternalMcpApprovalAlertMode(value: string | null): ExternalMcpApprovalAlertMode {

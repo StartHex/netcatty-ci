@@ -45,6 +45,18 @@ export const sanitizeVaultNote = (note: Partial<VaultNote>): VaultNote => {
     updatedAt,
     order: typeof note.order === "number" && Number.isFinite(note.order) ? note.order : undefined,
     isPinned: note.isPinned ? true : undefined,
+    // Area fields are only written when set, so notes that never left the
+    // daily area serialize exactly as before.
+    ...(note.area === "organized" ? { area: "organized" as const } : {}),
+    ...(typeof note.organizedAt === "number" && Number.isFinite(note.organizedAt)
+      ? { organizedAt: note.organizedAt }
+      : {}),
+    ...(typeof note.organizedInto === "string" && note.organizedInto.trim()
+      ? { organizedInto: note.organizedInto }
+      : {}),
+    ...(cleanStringArray(note.organizedFrom)?.length
+      ? { organizedFrom: cleanStringArray(note.organizedFrom) }
+      : {}),
   };
 };
 

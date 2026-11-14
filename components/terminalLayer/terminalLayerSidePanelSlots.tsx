@@ -16,6 +16,7 @@ import {
   subscribeNotesNoop,
   useNotesStore,
 } from '../../application/state/notesStore';
+import { noteTabStore } from '../../application/state/noteTabStore';
 import {
   getShellHistorySnapshot,
   subscribeShellHistory,
@@ -471,6 +472,8 @@ function SidePanelThemeSlotInner({
 export const SidePanelThemeSlot = memo(SidePanelThemeSlotInner);
 SidePanelThemeSlot.displayName = 'SidePanelThemeSlot';
 
+const openNoteInTab = (noteId: string) => noteTabStore.open(noteId);
+
 function SidePanelNotesSlotInner({
   tabId,
   ctx,
@@ -512,6 +515,7 @@ function SidePanelNotesSlotInner({
         isActive={isVisible}
         openNoteId={openNoteRequest?.noteId ?? null}
         openNoteRequestId={openNoteRequest?.requestId ?? null}
+        onOpenNoteInTab={openNoteInTab}
       />
     </div>
   );
@@ -604,6 +608,7 @@ function SidePanelAiSlotInner({
     onOpenVaultHostFromChat,
     onOpenVaultSectionFromChat,
     onOpenVaultSnippetFromChat,
+    onSetWorkspaceAnchorChat,
     validAIScopeTargetIds,
   } = ctx;
   const workspaces = ctx.workspaces as Workspace[];
@@ -654,6 +659,7 @@ function SidePanelAiSlotInner({
         mountedTabIds={mountedAiTabIds}
         activeTabId={activeTabId}
         activeSidePanelTab={isVisible ? 'ai' : null}
+        liveScopeTargetIds={validAIScopeTargetIds}
         contextsByTabId={aiContextsByTabId}
         resolveExecutorContext={resolveAIExecutorContext}
         pendingTerminalSelection={pendingTerminalSelectionForAI}
@@ -665,6 +671,8 @@ function SidePanelAiSlotInner({
         onOpenVaultHostFromChat={onOpenVaultHostFromChat}
         onOpenVaultSectionFromChat={onOpenVaultSectionFromChat}
         onOpenVaultSnippetFromChat={onOpenVaultSnippetFromChat}
+        onSetWorkspaceAnchorChat={onSetWorkspaceAnchorChat as ((workspaceId: string, chatId: string | null) => void) | undefined}
+        workspaces={workspaces}
       />
     </AISidePanelStateRoot>
   );
@@ -693,7 +701,7 @@ export function movePersistentPortalNode(
   }
 }
 
-function PersistentSidePanelPortal({
+export function PersistentSidePanelPortal({
   portalKey,
   target,
   children,

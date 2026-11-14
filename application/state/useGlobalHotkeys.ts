@@ -55,5 +55,10 @@ export const getTerminalPassthroughActions = (): Set<string> => {
     'increaseTerminalFontSize',
     'decreaseTerminalFontSize',
     'resetTerminalFontSize',
+    'toggleTerminalLineNumbers',
+    'goToTerminalLine',
+    'toggleTerminalLineMark',
+    'nextTerminalLineMark',
+    'prevTerminalLineMark',
   ]);
 };
