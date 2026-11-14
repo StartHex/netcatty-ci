@@ -235,6 +235,9 @@ declare global {
     bindAddress?: string;
     remoteHost?: string;
     remotePort?: number;
+    // Local forwards only: check that the target is reachable through the
+    // host before reporting the forward as active.
+    verifyRemote?: boolean;
     // SSH connection details
     hostname: string;
     hostId?: string;
