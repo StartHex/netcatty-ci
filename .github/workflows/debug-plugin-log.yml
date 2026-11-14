@@ -1,6 +1,6 @@
 name: debug-plugin-log
 
-# Temporary: checks the memory cap wrapper and the repaired suite on a runner.
+# Temporary: checks the memory cap wrapper and two test fixes on a runner.
 on:
   push:
     branches:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -23,59 +23,46 @@ jobs:
       - name: Wrapper keeps the environment
         env:
           NODE_OPTIONS: --max-old-space-size=3072
-          PROBE_VALUE: carried over
+          PROBE_VALUE: "carried over, with spaces and \"quotes\""
         run: |
           bash scripts/ci/with-memory-cap.sh node -e '
             const os = require("os");
-            console.log(JSON.stringify({
+            const report = {
               uid: process.getuid(), user: os.userInfo().username, home: process.env.HOME, cwd: process.cwd(),
-              node: process.version, nodeOptions: process.env.NODE_OPTIONS, probe: process.env.PROBE_VALUE,
+              nodeOptions: process.env.NODE_OPTIONS, probe: process.env.PROBE_VALUE,
               ci: process.env.CI, actions: process.env.GITHUB_ACTIONS, workspace: process.env.GITHUB_WORKSPACE,
-              npm: require("child_process").execSync("npm --version").toString().trim(),
+              runnerTemp: process.env.RUNNER_TEMP, envCount: Object.keys(process.env).length,
               cgroup: require("fs").readFileSync("/proc/self/cgroup", "utf8").trim(),
-            }, null, 1));
+            };
+            console.log(JSON.stringify(report, null, 1));
+            const missing = ["nodeOptions", "probe", "ci", "actions", "workspace", "runnerTemp"].filter((key) => !report[key]);
+            if (missing.length) { console.error("missing: " + missing.join(", ")); process.exit(1); }
+            if (!/\.scope$/.test(report.cgroup)) { console.error("not in a scope"); process.exit(1); }
           '
-          echo "exit=$?"
-      - name: Wrapper stops a runaway process and says so
-        run: |
-          set +e
-          cat > /tmp/runaway.test.cjs <<'JS'
-          const test = require("node:test");
-          test("eats memory", () => { const keep = []; for (;;) keep.push(Buffer.alloc(8 * 1024 * 1024, 1)); });
-          JS
-          cat > /tmp/fine.test.cjs <<'JS'
-          const test = require("node:test");
-          test("fine before", () => {});
-          JS
-          cat > /tmp/later.test.cjs <<'JS'
-          const test = require("node:test");
-          test("still runs after the runaway was stopped", () => {});
-          JS
-          free -m | sed -n 2p
-          MEMORY_CAP=2G bash scripts/ci/with-memory-cap.sh node --test --test-concurrency=1 /tmp/fine.test.cjs /tmp/runaway.test.cjs /tmp/later.test.cjs > /tmp/capped.log 2>&1
-          code=$?
-          echo "capped run exit=$code"
-          grep -n "^ok\|^not ok\|^# \(pass\|fail\|tests\)\|::error\|signal\|SIGKILL\|exitCode" /tmp/capped.log | head -30
-          free -m | sed -n 2p
-          test "$code" != "0" || { echo "::error::a killed test passed for green"; exit 1; }
-          grep -q "::error title=Memory cap reached" /tmp/capped.log || { echo "::error::no memory cap message"; exit 1; }
-          grep -q "^ok .*still runs after the runaway was stopped" /tmp/capped.log || { echo "::error::the run did not continue after the kill"; exit 1; }
-          echo "wrapper behaves"
-      - name: Repaired plugin log suite, 14 times
-        run: |
-          set +e
-          failures=0
-          for i in $(seq 1 14); do
-            MEMORY_CAP=3G bash scripts/ci/with-memory-cap.sh timeout -s KILL 60 node --import tsx components/settings/tabs/PluginLogSettings.test.tsx > /tmp/fixed-$i.log 2>&1
-            code=$?
-            echo "run $i exit=$code $(grep -c '^ok' /tmp/fixed-$i.log) ok, $(grep '^  duration_ms' /tmp/fixed-$i.log | head -1)"
-            if [ "$code" != "0" ]; then failures=$((failures + 1)); tail -30 /tmp/fixed-$i.log | cut -c1-300; fi
-          done
-          echo "failures: $failures"
-          test "$failures" = "0"
+          echo "outer env count: $(env | wc -l)"
+          ls -la "${TMPDIR:-/tmp}" | grep -c "tmp\." || true
       - name: All plugin settings suites under the cap
         run: |
+          set +e
           bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/Plugin*.test.tsx > /tmp/all.log 2>&1
           code=$?
-          grep "^not ok\|^# \(tests\|pass\|fail\|cancelled\|duration_ms\)" /tmp/all.log
+          grep "^# \(tests\|pass\|fail\|cancelled\|duration_ms\)" /tmp/all.log
+          grep -n "^not ok" -A 30 /tmp/all.log | cut -c1-260 | head -120
           exit $code
+      - name: Virtualized list suites with the locked react-virtual
+        run: |
+          set +e
+          node -p "'react-virtual ' + require('@tanstack/react-virtual/package.json').version + ', virtual-core ' + require('@tanstack/virtual-core/package.json').version"
+          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/GlobalSftpTransferCenter.children-performance.test.tsx components/GlobalSftpTransferCenter.virtualization.test.tsx components/HostTreeView.orderUpdates.test.tsx > /tmp/virt-new.log 2>&1
+          echo "exit=$?"
+          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/virt-new.log | cut -c1-200
+          true
+      - name: The same suites with upstream's react-virtual
+        run: |
+          set +e
+          npm install --no-save --no-audit --no-fund @tanstack/react-virtual@3.14.8 @tanstack/virtual-core@3.17.6 > /tmp/install.log 2>&1 || tail -20 /tmp/install.log
+          node -p "'react-virtual ' + require('@tanstack/react-virtual/package.json').version + ', virtual-core ' + require('@tanstack/virtual-core/package.json').version"
+          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/GlobalSftpTransferCenter.children-performance.test.tsx components/GlobalSftpTransferCenter.virtualization.test.tsx components/HostTreeView.orderUpdates.test.tsx > /tmp/virt-old.log 2>&1
+          echo "exit=$?"
+          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/virt-old.log | cut -c1-200
+          true

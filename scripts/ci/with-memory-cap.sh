@@ -28,13 +28,18 @@ oom_kills() {
   awk '$1 == "oom_kill" { print $2; found = 1 } END { if (!found) print 0 }' /proc/vmstat 2>/dev/null || echo 0
 }
 
+# sudo only starts the scope: the command runs as the calling user, in the
+# calling directory, with the calling environment. sudo resets the environment
+# (and not every sudo honours -E), so it is handed over through a private file.
+environment_file="$(mktemp)"
+trap 'rm -f "${environment_file}"' EXIT
+export -p > "${environment_file}"
+
 run_capped() {
-  # sudo starts the scope, the command itself runs as the calling user with
-  # the calling environment (sudo would otherwise swap PATH and HOME).
-  sudo -n -E systemd-run --quiet --scope --collect \
+  sudo -n systemd-run --quiet --scope --collect \
     --uid="$(id -u)" --gid="$(id -g)" \
     -p "MemoryMax=${limit}" -p MemorySwapMax=0 -p OOMPolicy=continue \
-    -- env "PATH=${PATH}" "HOME=${HOME}" "$@"
+    -- bash -c 'source "$1"; shift; exec "$@"' with-memory-cap "${environment_file}" "$@"
 }
 
 can_cap() {
@@ -48,6 +53,8 @@ if ! can_cap; then
   if [ "${limit}" != "off" ]; then
     echo "with-memory-cap: no capped scope available here, running without a memory cap" >&2
   fi
+  rm -f "${environment_file}"
+  trap - EXIT
   exec "$@"
 fi
 
