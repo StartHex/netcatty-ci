@@ -37,11 +37,20 @@ interface TunnelRecord {
   remotePort: number;
   sshHostId: string;
   generation: number;
+  /** Shell relays only: what the driver must present to the local port. */
+  relayToken?: string;
 }
+
+export type DatabaseTunnelResult =
+  | { ok: true; host: string; port: number; relayToken?: string }
+  | { ok: false; error: string };
+
+/** The "endpoint" of a tunnel that ends in the host's shell (on-host driver). */
+const SHELL_RELAY_ENDPOINT = { host: 'shell', port: 0 } as const;
 
 const tunnels = new Map<string, TunnelRecord>();
 /** One in-flight start per connection, so parallel callers share it. */
-const pendingTunnels = new Map<string, Promise<{ ok: true; host: string; port: number } | { ok: false; error: string }>>();
+const pendingTunnels = new Map<string, Promise<DatabaseTunnelResult>>();
 let tunnelGeneration = 0;
 
 const noopStatus = () => {};
@@ -55,6 +64,21 @@ function buildRule(
   ruleId: string,
   remote: { host: string; port: number },
 ): PortForwardingRule {
+  if (connection.kind === 'onhost') {
+    // The driver runs on the host: its tunnel ends in the host's shell, not
+    // in a database port (which is closed to us - that is the whole point).
+    return {
+      id: ruleId,
+      label: `DB on host: ${connection.label}`,
+      type: 'local',
+      localPort: 0,
+      bindAddress: '127.0.0.1',
+      hostId: connection.sshHostId,
+      shellRelay: true,
+      status: 'inactive',
+      createdAt: Date.now(),
+    };
+  }
   return {
     id: ruleId,
     label: `DB tunnel: ${connection.label}`,
@@ -100,8 +124,12 @@ export function resolveDatabaseRemoteEndpoint(
 export async function ensureDatabaseTunnel(
   connection: DatabaseConnection,
   deps: DatabaseTunnelDeps,
-): Promise<{ ok: true; host: string; port: number } | { ok: false; error: string }> {
-  const remote = resolveDatabaseRemoteEndpoint(connection);
+): Promise<DatabaseTunnelResult> {
+  const onHost = connection.kind === 'onhost';
+  if (onHost && !connection.sshHostId) {
+    return { ok: false, error: 'Choose the SSH host this connection runs on' };
+  }
+  const remote = onHost ? SHELL_RELAY_ENDPOINT : resolveDatabaseRemoteEndpoint(connection);
   if (!connection.sshHostId) {
     return { ok: true, host: remote?.host ?? connection.host ?? '127.0.0.1', port: remote?.port ?? 0 };
   }
@@ -122,7 +150,14 @@ export async function ensureDatabaseTunnel(
     const sameEndpoint = existing.remoteHost === remote.host
       && existing.remotePort === remotePort
       && existing.sshHostId === connection.sshHostId;
-    if (sameEndpoint) return { ok: true, host: existing.host, port: existing.port };
+    if (sameEndpoint) {
+      return {
+        ok: true,
+        host: existing.host,
+        port: existing.port,
+        ...(existing.relayToken ? { relayToken: existing.relayToken } : {}),
+      };
+    }
     // The connection was edited (other jump host / database endpoint):
     // keeping the old forward would silently dial the old server.
     await closeDatabaseTunnel(connection.id);
@@ -140,7 +175,8 @@ async function openDatabaseTunnel(
   connection: DatabaseConnection,
   deps: DatabaseTunnelDeps,
   remote: { host: string; port: number },
-): Promise<{ ok: true; host: string; port: number } | { ok: false; error: string }> {
+): Promise<DatabaseTunnelResult> {
+  const onHost = connection.kind === 'onhost';
   const jumpHost = deps.hosts.find((host) => host.id === connection.sshHostId);
   if (!jumpHost) {
     return { ok: false, error: 'The SSH host used for this tunnel no longer exists' };
@@ -168,6 +204,9 @@ async function openDatabaseTunnel(
       false,
       deps.terminalSettings,
       deps.knownHosts ? [...deps.knownHosts] : undefined,
+      // A terminal session of its own: a bastion's host picker belongs to one
+      // login, and a one-channel bastion would refuse a shared connection.
+      onHost ? { dedicatedTransport: true } : undefined,
     );
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -176,13 +215,20 @@ async function openDatabaseTunnel(
     const via = jumpHost.label || jumpHost.hostname;
     return {
       ok: false,
-      error: `SSH tunnel to ${remote.host}:${remote.port} via ${via} failed: ${started.error || 'unknown error'}`,
+      error: onHost
+        ? `Could not log in to ${via}: ${started.error || 'unknown error'}`
+        : `SSH tunnel to ${remote.host}:${remote.port} via ${via} failed: ${started.error || 'unknown error'}`,
     };
   }
   const localPort = started.localPort;
-  if (!localPort) {
+  if (!localPort || (onHost && !started.relayToken)) {
     await stopPortForward(ruleId, noopStatus).catch(() => undefined);
-    return { ok: false, error: 'The SSH tunnel did not report a local port' };
+    return {
+      ok: false,
+      error: localPort
+        ? 'The SSH session did not hand over a terminal on the host'
+        : 'The SSH tunnel did not report a local port',
+    };
   }
   const record: TunnelRecord = {
     ruleId,
@@ -192,9 +238,15 @@ async function openDatabaseTunnel(
     remotePort: remote.port,
     sshHostId: connection.sshHostId ?? '',
     generation,
+    ...(started.relayToken ? { relayToken: started.relayToken } : {}),
   };
   tunnels.set(connection.id, record);
-  return { ok: true, host: record.host, port: record.port };
+  return {
+    ok: true,
+    host: record.host,
+    port: record.port,
+    ...(record.relayToken ? { relayToken: record.relayToken } : {}),
+  };
 }
 
 export async function closeDatabaseTunnel(connectionId: string): Promise<void> {
@@ -212,9 +264,21 @@ export async function closeAllDatabaseTunnels(): Promise<void> {
 /** Rewrite a connection target to the tunneled endpoint when one is active. */
 export function applyDatabaseTunnel(
   target: DbConnectionTarget,
-  tunnel: { host: string; port: number } | null,
+  tunnel: { host: string; port: number; relayToken?: string } | null,
 ): DbConnectionTarget {
   if (!tunnel) return target;
+  if (target.kind === 'onhost') {
+    // host/port are the local end of the shell relay; the token opens it.
+    return {
+      ...target,
+      host: tunnel.host,
+      port: tunnel.port,
+      onHost: {
+        ...(target.onHost ?? { mode: 'config' }),
+        ...(tunnel.relayToken ? { relayToken: tunnel.relayToken } : {}),
+      },
+    };
+  }
   // JDBC drivers read host/port from the URL, so rewrite it as well.
   const jdbcUrl = target.jdbcUrl
     ? rewriteJdbcUrlEndpoint(target.jdbcUrl, tunnel.host, tunnel.port)

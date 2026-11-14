@@ -26,6 +26,7 @@ const DIALECT_LABELS: Record<string, string> = {
   sqlserver: 'SQL Server',
   sqlite: 'SQLite',
   jdbc: 'the connected JDBC database',
+  onhost: 'a telecom in-memory database (ProMDB / DMDB) reached through its C client library: plain single-table style SQL, unquoted identifiers',
 };
 
 export function dialectLabel(dialect: string | undefined): string {

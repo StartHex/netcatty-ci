@@ -46,6 +46,11 @@ export function parseSingleTableQuery(sql: string): EditTarget | null {
 }
 
 export function quoteIdentifier(name: string, kind: DatabaseKind): string {
+  // The host client libraries route statements by their plain text and their
+  // in-memory engines do not take quoted names: a plain name stays as it is.
+  // Anything else is still quoted - a statement the engine may refuse is
+  // better than one that means something else.
+  if (kind === 'onhost' && /^[A-Za-z_][A-Za-z0-9_$#]*$/.test(name)) return name;
   if (kind === 'mysql' || kind === 'mariadb' || kind === 'sqlite') {
     return `\`${name.replace(/`/g, '``')}\``;
   }

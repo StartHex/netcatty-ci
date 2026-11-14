@@ -9,7 +9,20 @@
  */
 
 /** Drivers bundled with the app. `jdbc` routes through the Java sidecar. */
-export type DatabaseKind = 'postgresql' | 'mysql' | 'mariadb' | 'oracle' | 'sqlserver' | 'sqlite' | 'jdbc';
+export type DatabaseKind =
+  | 'postgresql'
+  | 'mysql'
+  | 'mariadb'
+  | 'oracle'
+  | 'sqlserver'
+  | 'sqlite'
+  | 'jdbc'
+  /**
+   * Connects from the SSH host itself, with the database client libraries
+   * installed there (DSCI / ProMDB), for databases whose port is only open to
+   * that host. Nothing is forwarded: the queries run on the host.
+   */
+  | 'onhost';
 
 export type DatabaseSslMode = 'disable' | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
 
@@ -24,7 +37,52 @@ export const DATABASE_KINDS: readonly DatabaseKind[] = [
   'sqlserver',
   'sqlite',
   'jdbc',
+  'onhost',
 ] as const;
+
+/**
+ * How the on-host driver finds its database once it is on the host:
+ * `config` uses an entry of the host's own `db.cfg` (where the login lives
+ * too), `direct` connects with the account, type and server given here.
+ */
+export type OnHostDatabaseMode = 'config' | 'direct';
+
+export const ON_HOST_DATABASE_MODES: readonly OnHostDatabaseMode[] = ['config', 'direct'] as const;
+
+/** Database types the host's client library can open by name. */
+export const ON_HOST_DATABASE_TYPES = ['dmdb', 'imdb', 'oracle', 'mysql', 'altibase', 'opengauss'] as const;
+
+export type OnHostDatabaseType = (typeof ON_HOST_DATABASE_TYPES)[number];
+
+/**
+ * One exchange on the way to the host's shell: wait for `expect` to show up in
+ * the terminal, then type `send` and press Enter. This is how a bastion's
+ * "enter the address, pick the account" menu is answered. `expect` is plain
+ * text, or `/pattern/flags` for a regular expression.
+ */
+export interface OnHostLoginStep {
+  expect: string;
+  send: string;
+  /** How long to wait for `expect`, in milliseconds. */
+  timeoutMs?: number;
+}
+
+export const ON_HOST_MAX_LOGIN_STEPS = 12;
+
+export interface OnHostDatabaseSettings {
+  mode: OnHostDatabaseMode;
+  /** `config` mode: number of the `[DBnn]` entry; empty means the file's default. */
+  dbNo?: number;
+  /** `direct` mode. */
+  dbType?: OnHostDatabaseType;
+  /** `direct` mode: what the client library dials, e.g. `host:port` or a service name. */
+  server?: string;
+  /** A shell line run before the driver starts, e.g. `. ~/.bash_profile`. */
+  envCommand?: string;
+  /** Python on the host; empty tries python3, python, python2. */
+  python?: string;
+  loginSteps?: OnHostLoginStep[];
+}
 
 export const DATABASE_SSL_MODES: readonly DatabaseSslMode[] = [
   'disable',
@@ -34,7 +92,7 @@ export const DATABASE_SSL_MODES: readonly DatabaseSslMode[] = [
   'verify-full',
 ] as const;
 
-export const DATABASE_DEFAULT_PORTS: Record<Exclude<DatabaseKind, 'sqlite' | 'jdbc'>, number> = {
+export const DATABASE_DEFAULT_PORTS: Record<Exclude<DatabaseKind, 'sqlite' | 'jdbc' | 'onhost'>, number> = {
   postgresql: 5432,
   mysql: 3306,
   mariadb: 3306,
@@ -50,6 +108,11 @@ export function databaseKindUsesFile(kind: DatabaseKind): boolean {
 /** JDBC connections carry their own URL instead of host/port/database fields. */
 export function databaseKindUsesJdbc(kind: DatabaseKind): boolean {
   return kind === 'jdbc';
+}
+
+/** The database is reached from the SSH host with the client libraries there. */
+export function databaseKindUsesOnHost(kind: DatabaseKind): boolean {
+  return kind === 'onhost';
 }
 
 /** True when the connection needs a network endpoint (host + port). */
@@ -119,6 +182,8 @@ export interface DatabaseConnection {
   inMemory?: boolean;
   /** JDBC-only: statements executed right after the connection opens. */
   initSql?: string;
+  /** On-host only: how the driver gets to the host's shell and to the database. */
+  onHost?: OnHostDatabaseSettings;
   group?: string;
   tags?: string[];
   colorTag?: DatabaseColorTag;
@@ -188,6 +253,10 @@ export interface DbTestConnectionResult {
   durationMs: number;
   serverVersion?: string;
   error?: string;
+  /** The bridge's code for the failure, when it has one. */
+  errorCode?: string;
+  /** More about the failure, e.g. what the host printed before a login step timed out. */
+  errorDetail?: string;
 }
 
 /** Connection target used by the main process; credentials travel per call. */
@@ -210,6 +279,11 @@ export interface DbConnectionTarget {
   clientEncoding?: string;
   inMemory?: boolean;
   initSql?: string;
+  /**
+   * On-host driver: the saved settings plus the one-time token of the shell
+   * relay that `host`/`port` point at (see portForwardShellRelay).
+   */
+  onHost?: OnHostDatabaseSettings & { relayToken?: string };
   /** Already-resolved SSH jump credentials for this call. */
   ssh?: {
     host: string;
@@ -249,6 +323,59 @@ function sanitizeProperties(value: unknown): Record<string, string> | undefined 
     out[name] = raw;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const ON_HOST_STEP_TIMEOUT_MIN_MS = 1000;
+const ON_HOST_STEP_TIMEOUT_MAX_MS = 5 * 60 * 1000;
+
+function sanitizeOnHostLoginSteps(value: unknown): OnHostLoginStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps: OnHostLoginStep[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Partial<OnHostLoginStep>;
+    // What to wait for must be there; what to type may be empty (just Enter).
+    const expect = typeof record.expect === 'string' ? record.expect.trim().slice(0, 200) : '';
+    if (!expect) continue;
+    const send = typeof record.send === 'string' ? record.send.slice(0, 500) : '';
+    const timeout = Number(record.timeoutMs);
+    steps.push({
+      expect,
+      send,
+      ...(Number.isFinite(timeout) && timeout > 0
+        ? {
+            timeoutMs: Math.min(
+              ON_HOST_STEP_TIMEOUT_MAX_MS,
+              Math.max(ON_HOST_STEP_TIMEOUT_MIN_MS, Math.trunc(timeout)),
+            ),
+          }
+        : {}),
+    });
+    if (steps.length >= ON_HOST_MAX_LOGIN_STEPS) break;
+  }
+  return steps.length > 0 ? steps : undefined;
+}
+
+export function sanitizeOnHostSettings(value: unknown): OnHostDatabaseSettings {
+  const record = (value && typeof value === 'object' ? value : {}) as Partial<OnHostDatabaseSettings>;
+  const mode: OnHostDatabaseMode = record.mode === 'direct' ? 'direct' : 'config';
+  const dbNo = Number(record.dbNo);
+  const dbType = ON_HOST_DATABASE_TYPES.includes(record.dbType as OnHostDatabaseType)
+    ? (record.dbType as OnHostDatabaseType)
+    : undefined;
+  const server = NON_EMPTY(record.server);
+  const envCommand = NON_EMPTY(record.envCommand);
+  const python = NON_EMPTY(record.python);
+  const loginSteps = sanitizeOnHostLoginSteps(record.loginSteps);
+  return {
+    mode,
+    ...(mode === 'config' && Number.isInteger(dbNo) && dbNo >= 1 && dbNo <= 99 ? { dbNo } : {}),
+    ...(mode === 'direct' && dbType ? { dbType } : {}),
+    ...(mode === 'direct' && server ? { server: server.slice(0, 300) } : {}),
+    ...(envCommand ? { envCommand: envCommand.slice(0, 2000) } : {}),
+    ...(python ? { python: python.slice(0, 300) } : {}),
+    ...(loginSteps ? { loginSteps } : {}),
+  };
 }
 
 /**
@@ -293,6 +420,7 @@ export function sanitizeDatabaseConnection(
     clientEncoding: NON_EMPTY(input.clientEncoding),
     inMemory: input.inMemory === true ? true : undefined,
     initSql: NON_EMPTY(input.initSql),
+    ...(kind === 'onhost' ? { onHost: sanitizeOnHostSettings(input.onHost) } : {}),
     group: NON_EMPTY(input.group),
     tags: Array.isArray(input.tags) ? input.tags.map(NON_EMPTY).filter((tag): tag is string => Boolean(tag)) : undefined,
     colorTag,
@@ -355,6 +483,13 @@ export function isDatabaseConnectionReady(connection: DatabaseConnection): boole
   if (databaseKindUsesJdbc(connection.kind)) {
     return Boolean(connection.jdbcUrl && (connection.jdbcDriverId || connection.jdbcDriverClass));
   }
+  if (databaseKindUsesOnHost(connection.kind)) {
+    // The host is where the driver runs: without one there is nothing to do.
+    if (!connection.sshHostId) return false;
+    const settings = connection.onHost;
+    if (!settings || settings.mode === 'config') return true;
+    return Boolean(settings.dbType && settings.server && connection.username);
+  }
   return Boolean(connection.host && (connection.username || connection.kind === 'postgresql'));
 }
 
@@ -364,6 +499,13 @@ export function databaseDisplayTarget(connection: DatabaseConnection): string {
   }
   if (databaseKindUsesJdbc(connection.kind)) {
     return connection.jdbcUrl ?? 'jdbc:';
+  }
+  if (databaseKindUsesOnHost(connection.kind)) {
+    const settings = connection.onHost;
+    if (settings?.mode === 'direct') {
+      return `${settings.dbType ?? 'db'}:${settings.server ?? ''}`;
+    }
+    return settings?.dbNo ? `db.cfg DB${String(settings.dbNo).padStart(2, '0')}` : 'db.cfg';
   }
   const port = databaseEffectivePort(connection);
   const hostPart = `${connection.host ?? 'localhost'}${port ? `:${port}` : ''}`;
@@ -407,5 +549,6 @@ export function databaseConnectionTarget(
     clientEncoding: connection.clientEncoding,
     inMemory: connection.inMemory,
     initSql: connection.initSql,
+    ...(connection.kind === 'onhost' ? { onHost: sanitizeOnHostSettings(connection.onHost) } : {}),
   };
 }

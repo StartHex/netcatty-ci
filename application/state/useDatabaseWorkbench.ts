@@ -25,7 +25,6 @@ import {
   closeDatabaseConnection,
   databaseConnectionTarget,
   listDatabaseColumns,
-  formatDatabaseError,
   openDatabaseConnection,
   controlDatabaseTransaction,
   listDatabaseTables,
@@ -45,6 +44,8 @@ import {
 import type { DbConnectionTarget, DbTestConnectionResult } from '../../domain/models';
 import { useI18n } from '../i18n/I18nProvider';
 import { activeTabStore } from './activeTabStore';
+import { testDatabaseConnectionThroughHost } from './databaseConnectionTest';
+import { describeDatabaseConnectFailure, describeDatabaseError } from './databaseErrorMessages';
 import { DatabaseTabRoster } from './databaseTabRoster';
 import {
   databaseTabStore,
@@ -173,36 +174,20 @@ export function useDatabaseConnectionTester(
 ): { test: (connection: DatabaseConnection) => Promise<DbTestConnectionResult> } {
   const test = useCallback(
     async (connection: DatabaseConnection): Promise<DbTestConnectionResult> => {
-      const base = databaseConnectionTarget(connection);
-      if (!connection.sshHostId || !tunnelDeps) return testDatabaseConnection(base);
-      const tunnel = await ensureDatabaseTunnel(connection, tunnelDeps);
-      if (tunnel.ok !== true) return { ok: false, durationMs: 0, error: tunnel.error };
-      return testDatabaseConnection(applyDatabaseTunnel(base, { host: tunnel.host, port: tunnel.port }));
+      const needsHost = Boolean(connection.sshHostId) || connection.kind === 'onhost';
+      if (!needsHost || !tunnelDeps) return testDatabaseConnection(databaseConnectionTarget(connection));
+      return testDatabaseConnectionThroughHost(connection, {
+        ensureTunnel: (probe) => ensureDatabaseTunnel(probe, tunnelDeps),
+        closeTunnel: closeDatabaseTunnel,
+        testTarget: testDatabaseConnection,
+      });
     },
     [tunnelDeps],
   );
   return { test };
 }
 
-/** Bridge error codes that deserve a translated message instead of the driver text. */
-const DB_ERROR_MESSAGE_KEYS: Record<string, string> = {
-  'query-cancelled': 'databases.workbench.queryCancelled',
-  'query-timeout': 'databases.workbench.queryTimeout',
-  'transaction-lost': 'databases.workbench.transactionLost',
-  'connect-timeout': 'databases.workbench.connectTimeout',
-};
-
-export function describeDatabaseError(
-  error: DbBridgeError | undefined | null,
-  t: (key: string) => string,
-): string {
-  const key = error?.code ? DB_ERROR_MESSAGE_KEYS[error.code] : undefined;
-  if (key) {
-    const translated = t(key);
-    if (translated && translated !== key) return translated;
-  }
-  return formatDatabaseError(error);
-}
+export { describeDatabaseError };
 
 /**
  * @param frontTabId The workbench tab the app is showing right now, or null
@@ -288,16 +273,16 @@ export function useDatabaseWorkbench(
         ? { ...base, clientEncoding: encodingOverride }
         : base;
       const deps = tunnelDepsRef.current;
-      if (!connection.sshHostId || !deps) return { ok: true, target: withEncoding };
+      // An on-host connection always goes through its host; without one the
+      // tunnel service says so instead of the driver failing obscurely.
+      const needsHost = Boolean(connection.sshHostId) || connection.kind === 'onhost';
+      if (!needsHost || !deps) return { ok: true, target: withEncoding };
       const tunnel = await ensureDatabaseTunnel(
         encodingOverride ? { ...connection, clientEncoding: encodingOverride } : connection,
         deps,
       );
       if (tunnel.ok !== true) return { ok: false, error: tunnel.error };
-      return {
-        ok: true,
-        target: applyDatabaseTunnel(withEncoding, { host: tunnel.host, port: tunnel.port }),
-      };
+      return { ok: true, target: applyDatabaseTunnel(withEncoding, tunnel) };
     },
     [],
   );
@@ -497,7 +482,15 @@ export function useDatabaseWorkbench(
           patchTab(tabId, {
             status: 'error',
             connected: false,
-            error: result.error ?? 'Connection failed',
+            error: describeDatabaseConnectFailure(result, tRef.current, 'Connection failed'),
+            // What the host printed last is how a failed login is understood.
+            errorDetail: result.errorDetail
+              ? {
+                  message: result.error ?? 'Connection failed',
+                  ...(result.errorCode ? { code: result.errorCode } : {}),
+                  detail: result.errorDetail,
+                }
+              : undefined,
           });
           return;
         }

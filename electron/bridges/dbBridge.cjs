@@ -2,6 +2,7 @@
 
 const { readDriverClassesFromJar } = require("./jdbcJar.cjs");
 const { resolveJava } = require("./javaRuntime.cjs");
+const { createOnHostSession } = require("./dbAgent/onHostSession.cjs");
 
 /**
  * Database bridge — main-process side of the SQL workbench.
@@ -175,6 +176,9 @@ const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 15000;
 /** Upper bound for a test / connect round-trip (connect + version query). */
 const CONNECT_ROUNDTRIP_TIMEOUT_MS = 45000;
+// An on-host session first answers a bastion's menus, finds Python, sends its
+// agent over and only then connects: give that chain room.
+const ON_HOST_CONNECT_TIMEOUT_MS = 180000;
 /** Schema tree / structure lookups. */
 const METADATA_TIMEOUT_MS = 60000;
 /** BEGIN / COMMIT / ROLLBACK; can queue behind a running statement. */
@@ -187,6 +191,10 @@ const CLOSE_TIMEOUT_MS = 3000;
 const JDBC_TIMEOUT_GRACE_MS = 3000;
 
 const sessions = new Map();
+
+function connectTimeoutFor(target) {
+  return target?.kind === "onhost" ? ON_HOST_CONNECT_TIMEOUT_MS : CONNECT_ROUNDTRIP_TIMEOUT_MS;
+}
 
 /** Resolves true when `promise` settles within `ms`, false otherwise (never rejects). */
 function settleWithin(promise, ms) {
@@ -257,6 +265,9 @@ function connectionFingerprint(target) {
     target.jdbcProperties,
     target.clientEncoding,
     target.initSql,
+    // On-host driver: which database on the host, how to get to its shell,
+    // and the relay it goes through (a new relay means a new login).
+    target.onHost,
   ];
   return crypto.createHash("sha256").update(JSON.stringify(relevant)).digest("hex");
 }
@@ -1400,6 +1411,9 @@ function driverFor(kind) {
       return createSqliteSession;
     case "jdbc":
       return createJdbcSession;
+    case "onhost":
+      // Runs on the SSH host with the client libraries installed there.
+      return (target) => createOnHostSession(target, { commandFromSql });
     default: {
       const error = new Error(`Unsupported database kind: ${kind}`);
       error.code = "unsupported-kind";
@@ -1601,18 +1615,19 @@ const handlers = {
     } catch (error) {
       return failure(error);
     }
+    const connectTimeout = connectTimeoutFor(target);
     try {
-      await withTimeout(entry.ready, CONNECT_ROUNDTRIP_TIMEOUT_MS);
+      await withTimeout(entry.ready, connectTimeout);
       if (entry.initError) throw entry.initError;
       const serverVersion = await entry.run(() =>
-        runWithDeadline(entry, () => entry.session.serverVersion(), CONNECT_ROUNDTRIP_TIMEOUT_MS, {
+        runWithDeadline(entry, () => entry.session.serverVersion(), connectTimeout, {
           cancelOnTimeout: false,
         }),
       );
       return { ok: true, durationMs: Date.now() - started, serverVersion };
     } catch (error) {
       if (error?.code === "query-timeout") {
-        return failure(errorWithCode(`Connection timed out after ${CONNECT_ROUNDTRIP_TIMEOUT_MS / 1000}s`, "connect-timeout"));
+        return failure(errorWithCode(`Connection timed out after ${connectTimeout / 1000}s`, "connect-timeout"));
       }
       return failure(error);
     } finally {
@@ -1628,11 +1643,12 @@ const handlers = {
     } catch (error) {
       return failure(error);
     }
+    const connectTimeout = connectTimeoutFor(target);
     try {
-      await withTimeout(entry.ready, CONNECT_ROUNDTRIP_TIMEOUT_MS);
+      await withTimeout(entry.ready, connectTimeout);
       if (entry.initError) throw entry.initError;
       const serverVersion = await entry.run(() =>
-        runWithDeadline(entry, () => entry.session.serverVersion(), CONNECT_ROUNDTRIP_TIMEOUT_MS, {
+        runWithDeadline(entry, () => entry.session.serverVersion(), connectTimeout, {
           cancelOnTimeout: false,
         }),
       );
@@ -1640,7 +1656,7 @@ const handlers = {
     } catch (error) {
       await entry.close();
       if (error?.code === "query-timeout") {
-        return failure(errorWithCode(`Connection timed out after ${CONNECT_ROUNDTRIP_TIMEOUT_MS / 1000}s`, "connect-timeout"));
+        return failure(errorWithCode(`Connection timed out after ${connectTimeout / 1000}s`, "connect-timeout"));
       }
       return failure(error);
     }

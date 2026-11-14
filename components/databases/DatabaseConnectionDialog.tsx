@@ -9,8 +9,6 @@ import { useI18n } from '../../application/i18n/I18nProvider';
 import {
   DATABASE_DEFAULT_PORTS,
   databaseDisplayTarget,
-  databaseEffectivePort,
-  sanitizeDatabaseConnection,
   type DatabaseConnection,
   type DatabaseKind,
   type JdbcDriver,
@@ -20,13 +18,22 @@ import {
 import { cn } from '../../lib/utils';
 import { netcattyBridge } from '@/infrastructure/services/netcattyBridge.ts';
 import { detectJavaRuntime, readJdbcDriverClasses } from '@/infrastructure/services/databaseService';
+import { describeDatabaseConnectFailure } from '../../application/state/databaseErrorMessages';
 import type { DbTestConnectionResult } from '../../domain/models';
 import {
   JDBC_PRESETS,
   applyJdbcPresetTemplate,
   findJdbcPreset,
 } from '../../domain/database/jdbcPresets';
-import { DATABASE_ENCODINGS, supportsClientEncoding } from '../../domain/database/encoding';
+import { databaseEncodingChoices, supportsClientEncoding } from '../../domain/database/encoding';
+import {
+  EMPTY_DATABASE_CONNECTION_FORM as EMPTY_FORM,
+  connectionFromForm,
+  formFromConnection,
+  formUsesAccount,
+  type DatabaseConnectionFormState as FormState,
+} from '../../domain/database/connectionForm';
+import { onHostFormProblem } from '../../domain/database/onHostForm';
 import { Button } from '../ui/button';
 import {
   Dialog,
@@ -41,11 +48,15 @@ import { Label } from '../ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Switch } from '../ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
+import { OnHostConnectionFields } from './OnHostConnectionFields';
 
-const KINDS: DatabaseKind[] = ['postgresql', 'mysql', 'mariadb', 'oracle', 'sqlserver', 'sqlite', 'jdbc'];
+const KINDS: DatabaseKind[] = ['postgresql', 'mysql', 'mariadb', 'oracle', 'sqlserver', 'sqlite', 'jdbc', 'onhost'];
 const SSL_MODES: DatabaseSslMode[] = ['disable', 'require', 'verify-ca', 'verify-full'];
 
 const COLOR_TAGS: DatabaseColorTag[] = ['none', 'red', 'orange', 'yellow', 'green', 'blue', 'purple'];
+
+// The form's data lives in the domain layer; these stay importable from here.
+export { connectionFromForm, formFromConnection };
 
 const COLOR_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {
   red: 'border-transparent bg-red-500',
@@ -55,86 +66,6 @@ const COLOR_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {
   blue: 'border-transparent bg-sky-500',
   purple: 'border-transparent bg-violet-500',
 };
-
-interface FormState {
-  label: string;
-  kind: DatabaseKind;
-  host: string;
-  port: string;
-  database: string;
-  username: string;
-  password: string;
-  savePassword: boolean;
-  readOnly: boolean;
-  sslMode: DatabaseSslMode;
-  initSql: string;
-  sqlitePath: string;
-  inMemory: boolean;
-  sshHostId: string;
-  jdbcUrl: string;
-  jdbcDriverClass: string;
-  jdbcDriverPaths: string[];
-  jdbcDriverId: string;
-  javaPath: string;
-  jdbcPresetId: string;
-  clientEncoding: string;
-  group: string;
-  colorTag: DatabaseColorTag;
-}
-
-const EMPTY_FORM: FormState = {
-  label: '',
-  kind: 'postgresql',
-  host: '127.0.0.1',
-  port: String(DATABASE_DEFAULT_PORTS.postgresql),
-  database: '',
-  username: '',
-  password: '',
-  savePassword: true,
-  readOnly: false,
-  sslMode: 'disable',
-  initSql: '',
-  sqlitePath: '',
-  inMemory: false,
-  sshHostId: '',
-  jdbcUrl: '',
-  jdbcDriverClass: '',
-  jdbcDriverPaths: [],
-  jdbcDriverId: '',
-  javaPath: '',
-  jdbcPresetId: '',
-  clientEncoding: '',
-  group: '',
-  colorTag: 'none',
-};
-
-export function formFromConnection(connection: DatabaseConnection): FormState {
-  return {
-    label: connection.label,
-    kind: connection.kind,
-    host: connection.host ?? '127.0.0.1',
-    port: String(databaseEffectivePort(connection) ?? ''),
-    database: connection.database ?? '',
-    username: connection.username ?? '',
-    password: connection.password ?? '',
-    savePassword: connection.savePassword !== false,
-    readOnly: connection.readOnly === true,
-    sslMode: connection.sslMode ?? 'disable',
-    initSql: connection.initSql ?? '',
-    sqlitePath: connection.sqlitePath ?? '',
-    inMemory: connection.inMemory === true,
-    sshHostId: connection.sshHostId ?? '',
-    jdbcUrl: connection.jdbcUrl ?? '',
-    jdbcDriverClass: connection.jdbcDriverClass ?? '',
-    jdbcDriverPaths: connection.jdbcDriverPaths ?? [],
-    jdbcDriverId: connection.jdbcDriverId ?? '',
-    javaPath: connection.javaPath ?? '',
-    jdbcPresetId: '',
-    clientEncoding: connection.clientEncoding ?? '',
-    group: connection.group ?? '',
-    colorTag: connection.colorTag ?? 'none',
-  };
-}
 
 /** "Testing connection… 3.2 s" — ticks on its own so the form does not re-render. */
 const TestElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => string; fallback: string }> = ({
@@ -157,6 +88,8 @@ const TestElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => s
 interface TestState {
   status: 'idle' | 'testing' | 'ok' | 'error';
   message?: string;
+  /** What the driver or the host said, shown under the message. */
+  detail?: string;
 }
 
 /**
@@ -242,6 +175,9 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
         kind,
         port,
         host: kind === 'sqlite' ? prev.host : prev.host === '' ? '127.0.0.1' : prev.host,
+        // Kinds offer different charsets: one the new kind does not have
+        // would be saved without showing in its list.
+        clientEncoding: databaseEncodingChoices(kind).includes(prev.clientEncoding) ? prev.clientEncoding : '',
       };
       draftCache.set(draftKey, next);
       return next;
@@ -251,6 +187,8 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
 
   const isSqlite = form.kind === 'sqlite';
   const isJdbc = form.kind === 'jdbc';
+  const isOnHost = form.kind === 'onhost';
+  const usesAccount = formUsesAccount(form);
   const supportsEncoding = supportsClientEncoding(form.kind);
 
   const registeredDriver = useMemo(
@@ -258,51 +196,22 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
     [jdbcDrivers, form.jdbcDriverId],
   );
 
-  const draft = useMemo<DatabaseConnection>(() => {
-    const base = connection ?? { id: crypto.randomUUID(), createdAt: Date.now() };
-    return sanitizeDatabaseConnection({
-      ...base,
-      label: form.label.trim(),
-      kind: form.kind,
-      host: isSqlite ? undefined : form.host.trim(),
-      port: isSqlite ? undefined : Number(form.port) || undefined,
-      database: isSqlite ? undefined : form.database.trim() || undefined,
-      username: isSqlite ? undefined : form.username.trim() || undefined,
-      password: form.savePassword ? form.password : undefined,
-      savePassword: form.savePassword,
-      readOnly: form.readOnly,
-      sslMode: isSqlite ? undefined : form.sslMode,
-      initSql: form.initSql.trim() || undefined,
-      sqlitePath: isSqlite ? form.sqlitePath.trim() : undefined,
-      inMemory: isSqlite ? form.inMemory : undefined,
-      sshHostId: isSqlite ? undefined : form.sshHostId || undefined,
-      jdbcUrl: isJdbc ? form.jdbcUrl.trim() : undefined,
-      jdbcDriverId: isJdbc ? form.jdbcDriverId || undefined : undefined,
-      jdbcDriverClass: isJdbc
-        ? form.jdbcDriverClass.trim() || registeredDriver?.driverClass
-        : undefined,
-      jdbcDriverPaths: isJdbc
-        ? form.jdbcDriverPaths.length > 0
-          ? form.jdbcDriverPaths
-          : registeredDriver
-            ? registeredDriver.jarPaths?.length
-              ? registeredDriver.jarPaths
-              : [registeredDriver.jarPath]
-            : undefined
-        : undefined,
-      javaPath: isJdbc ? form.javaPath.trim() || undefined : undefined,
-      clientEncoding: supportsEncoding ? form.clientEncoding || undefined : undefined,
-      group: form.group.trim() || undefined,
-      colorTag: form.colorTag === 'none' ? undefined : form.colorTag,
-    });
-  }, [connection, form, isJdbc, isSqlite, registeredDriver, supportsEncoding]);
+  const draft = useMemo<DatabaseConnection>(
+    () => connectionFromForm(form, connection ?? { id: crypto.randomUUID(), createdAt: Date.now() }, registeredDriver),
+    [connection, form, registeredDriver],
+  );
 
   const labelError = !draft.label;
+  const onHostProblem = isOnHost
+    ? onHostFormProblem({ sshHostId: form.sshHostId, username: form.username, form: form.onHost })
+    : null;
   const targetError = isSqlite
     ? !draft.inMemory && !draft.sqlitePath
     : isJdbc
       ? !draft.jdbcUrl || !/^jdbc:/.test(draft.jdbcUrl) || (draft.jdbcDriverPaths?.length ?? 0) === 0
-      : !draft.host || !draft.port || draft.port < 1 || draft.port > 65535;
+      : isOnHost
+        ? onHostProblem !== null
+        : !draft.host || !draft.port || draft.port < 1 || draft.port > 65535;
   const invalid = labelError || targetError;
 
   const handleSave = () => {
@@ -339,7 +248,11 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
         }),
       });
     } else {
-      setTest({ status: 'error', message: result.error ?? t('databases.testFailed') });
+      setTest({
+        status: 'error',
+        message: describeDatabaseConnectFailure(result, t, t('databases.testFailed')),
+        detail: result.errorDetail,
+      });
     }
   };
 
@@ -661,6 +574,16 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
                 ) : null}
               </div>
             </>
+          ) : isOnHost ? (
+            <OnHostConnectionFields
+              value={form.onHost}
+              sshHostId={form.sshHostId}
+              sshHosts={sshHosts ?? []}
+              problem={onHostProblem}
+              showError={showError}
+              onChange={(patch) => update('onHost', { ...form.onHost, ...patch })}
+              onHostChange={(hostId) => update('sshHostId', hostId)}
+            />
           ) : isSqlite ? (
             <>
               <div className="grid gap-2">
@@ -761,15 +684,19 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__default__">{t('databases.form.encodingDefault')}</SelectItem>
-                      {DATABASE_ENCODINGS.map((encoding) => (
+                      <SelectItem value="__default__">
+                        {isOnHost ? t('databases.onhost.encodingAuto') : t('databases.form.encodingDefault')}
+                      </SelectItem>
+                      {databaseEncodingChoices(form.kind).map((encoding) => (
                         <SelectItem key={encoding} value={encoding}>
                           {encoding}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">{t('databases.form.encodingHint')}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {isOnHost ? t('databases.onhost.encodingHint') : t('databases.form.encodingHint')}
+                  </p>
                 </div>
               ) : null}
               <div className="flex items-start justify-between gap-3 rounded-md border border-border/50 px-3 py-2">
@@ -782,30 +709,32 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
                   onCheckedChange={(checked) => update('readOnly', checked)}
                 />
               </div>
-              <div className="grid gap-2">
-                <Label>{t('databases.form.sshHost')}</Label>
-                <Select
-                  value={form.sshHostId || '__direct__'}
-                  onValueChange={(value) => update('sshHostId', value === '__direct__' ? '' : value)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__direct__">{t('databases.form.sshHostDirect')}</SelectItem>
-                    {(sshHosts ?? []).map((host) => (
-                      <SelectItem key={host.id} value={host.id}>
-                        {host.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">{t('databases.form.sshHostHint')}</p>
-              </div>
+              {isOnHost ? null : (
+                <div className="grid gap-2">
+                  <Label>{t('databases.form.sshHost')}</Label>
+                  <Select
+                    value={form.sshHostId || '__direct__'}
+                    onValueChange={(value) => update('sshHostId', value === '__direct__' ? '' : value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__direct__">{t('databases.form.sshHostDirect')}</SelectItem>
+                      {(sshHosts ?? []).map((host) => (
+                        <SelectItem key={host.id} value={host.id}>
+                          {host.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{t('databases.form.sshHostHint')}</p>
+                </div>
+              )}
             </>
           ) : null}
 
-          {!isSqlite ? (
+          {usesAccount ? (
             <div className="flex items-center justify-between gap-4 rounded-md border border-border/60 px-3 py-2">
               <div>
                 <p className="text-sm font-medium">{t('databases.form.savePassword')}</p>
@@ -818,7 +747,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
             </div>
           ) : null}
 
-          {!isSqlite ? (
+          {usesAccount ? (
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-2">
                 <Label htmlFor="db-user">{t('databases.form.username')}</Label>
@@ -899,15 +828,22 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
               ) : (
                 <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" />
               )}
-              <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
-                {test.status === 'testing' ? (
-                  <TestElapsed
-                    startedAt={testStartedAt}
-                    format={(seconds) => t('databases.testingElapsed', { seconds })}
-                    fallback={t('databases.testing')}
-                  />
-                ) : test.message}
-              </span>
+              <div className="min-w-0 flex-1">
+                <span className="whitespace-pre-wrap break-words">
+                  {test.status === 'testing' ? (
+                    <TestElapsed
+                      startedAt={testStartedAt}
+                      format={(seconds) => t('databases.testingElapsed', { seconds })}
+                      fallback={t('databases.testing')}
+                    />
+                  ) : test.message}
+                </span>
+                {test.status === 'error' && test.detail ? (
+                  <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded border border-destructive/20 bg-background/60 px-2 py-1 font-mono text-[11px] opacity-90">
+                    {test.detail}
+                  </pre>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </div>

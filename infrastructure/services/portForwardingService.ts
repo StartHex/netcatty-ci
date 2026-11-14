@@ -885,7 +885,15 @@ export const startPortForward = async (
   terminalSettings?: Pick<TerminalSettings, 'verifyHostKeys' | 'keepaliveInterval' | 'keepaliveCountMax'>,
   knownHosts?: KnownHost[],
   options?: { dedicatedTransport?: boolean; prepareOnly?: boolean },
-): Promise<{ success: boolean; error?: string; localPort?: number; tunnelId?: string; connectionOptions?: PortForwardOptions }> => {
+): Promise<{
+  success: boolean;
+  error?: string;
+  localPort?: number;
+  tunnelId?: string;
+  /** Shell relays only: what a client must send first (see `shellRelay`). */
+  relayToken?: string;
+  connectionOptions?: PortForwardOptions;
+}> => {
   const globalTerminalSettings = { ...FALLBACK_TERMINAL_SETTINGS, ...(terminalSettings ?? {}) };
   const bridge = netcattyBridge.get();
   if (rulesPendingCleanup.has(rule.id)) {
@@ -1129,6 +1137,7 @@ export const startPortForward = async (
       remoteHost: rule.remoteHost,
       remotePort: rule.remotePort,
       ...(rule.verifyRemote ? { verifyRemote: true } : {}),
+      ...(rule.shellRelay ? { shellRelay: true } : {}),
       hostname: host.hostname,
       hostId: host.id,
       port: host.port,
@@ -1249,7 +1258,12 @@ export const startPortForward = async (
     }
     exhaustedReconnectRules.delete(rule.id);
     
-    return { success: true, localPort: result.localPort, tunnelId: result.tunnelId };
+    return {
+      success: true,
+      localPort: result.localPort,
+      tunnelId: result.tunnelId,
+      ...(result.relayToken ? { relayToken: result.relayToken } : {}),
+    };
     
   } catch (err) {
     const error = err instanceof Error ? err.message : 'Unknown error';

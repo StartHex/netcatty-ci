@@ -42,19 +42,22 @@ function normalizeConnectResult(value: unknown): DbTestConnectionResult {
     ok?: boolean;
     durationMs?: number;
     serverVersion?: string;
-    error?: string | { message?: string };
+    error?: string | { message?: string; code?: string; detail?: string };
   };
+  const failure = record.error && typeof record.error === 'object' ? record.error : undefined;
   const error =
     typeof record.error === 'string'
       ? record.error
-      : record.error && typeof record.error.message === 'string'
-        ? record.error.message
+      : typeof failure?.message === 'string'
+        ? failure.message
         : undefined;
   return {
     ok: record.ok === true,
     durationMs: typeof record.durationMs === 'number' ? record.durationMs : 0,
     serverVersion: record.serverVersion,
     error,
+    ...(typeof failure?.code === 'string' && failure.code ? { errorCode: failure.code } : {}),
+    ...(typeof failure?.detail === 'string' && failure.detail ? { errorDetail: failure.detail } : {}),
   };
 }
 

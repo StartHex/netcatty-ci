@@ -60,6 +60,7 @@ const KIND_ICON_CLASS: Record<DatabaseKind, string> = {
   sqlserver: 'bg-blue-600 text-white dark:bg-blue-400 dark:text-slate-950',
   sqlite: 'bg-emerald-600 text-white dark:bg-emerald-400 dark:text-slate-950',
   jdbc: 'bg-violet-600 text-white dark:bg-violet-400 dark:text-slate-950',
+  onhost: 'bg-teal-600 text-white dark:bg-teal-400 dark:text-slate-950',
 };
 
 const COLOR_TAG_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {

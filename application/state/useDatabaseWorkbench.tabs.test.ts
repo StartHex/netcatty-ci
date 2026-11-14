@@ -20,7 +20,13 @@ Object.defineProperty(globalThis, 'localStorage', {
   },
 });
 
-type ConnectAnswer = { ok: boolean; durationMs: number; serverVersion?: string; error?: string };
+type ConnectAnswer = {
+  ok: boolean;
+  durationMs: number;
+  serverVersion?: string;
+  /** The bridge sends its failures as objects; older call sites sent text. */
+  error?: string | { message: string; code?: string; detail?: string };
+};
 
 const bridgeLog = {
   connects: [] as string[],
@@ -172,6 +178,65 @@ test('a failed connection leaves the user on the tab that explains it', async ()
     assert.equal(mounted.current.tabs[0].status, 'error');
     assert.equal(mounted.current.tabs[0].error, 'connection refused');
     assert.equal(activeTabStore.getActiveTabId(), toDatabaseTabId(tabId));
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test('a failed connection keeps the bridge\'s code and what the host printed', async () => {
+  beforeEachCase();
+  const conn = connection('conn_bastion');
+  const mounted = await mountWorkbench([conn]);
+  try {
+    await act(async () => {
+      databaseTabStore.requestOpen(conn.id);
+    });
+    await act(async () => {
+      bridgeLog.pending[0]({
+        ok: false,
+        durationMs: 30010,
+        error: {
+          message: 'Login step 1 timed out after 30s waiting for "Enter IP"',
+          code: 'onhost-login-step',
+          detail: 'Last login: Sat Nov 14\nOpt> ',
+        },
+      });
+    });
+    await settle();
+
+    const tab = mounted.current.tabs[0];
+    assert.equal(tab.status, 'error');
+    assert.match(tab.error ?? '', /Login step 1 timed out after 30s waiting for "Enter IP"/);
+    assert.deepEqual(tab.errorDetail, {
+      message: 'Login step 1 timed out after 30s waiting for "Enter IP"',
+      code: 'onhost-login-step',
+      detail: 'Last login: Sat Nov 14\nOpt> ',
+    });
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test('a driver\'s own failure code does not change what the tab says', async () => {
+  beforeEachCase();
+  const conn = connection('conn_refused');
+  const mounted = await mountWorkbench([conn]);
+  try {
+    await act(async () => {
+      databaseTabStore.requestOpen(conn.id);
+    });
+    await act(async () => {
+      bridgeLog.pending[0]({
+        ok: false,
+        durationMs: 3,
+        error: { message: 'connect ECONNREFUSED 10.0.0.5:5432', code: 'ECONNREFUSED' },
+      });
+    });
+    await settle();
+
+    const tab = mounted.current.tabs[0];
+    assert.equal(tab.error, 'connect ECONNREFUSED 10.0.0.5:5432');
+    assert.equal(tab.errorDetail, undefined, 'nothing more to show than the message');
   } finally {
     await mounted.unmount();
   }

@@ -19,7 +19,20 @@ export type DatabaseEncoding = (typeof DATABASE_ENCODINGS)[number];
  * strings and have no client-side switch.
  */
 export function supportsClientEncoding(kind: DatabaseKind): boolean {
-  return kind === 'mysql' || kind === 'mariadb' || kind === 'jdbc';
+  return kind === 'mysql' || kind === 'mariadb' || kind === 'jdbc' || kind === 'onhost';
+}
+
+/**
+ * What the on-host driver does when no encoding is chosen: it goes by the
+ * host's locale and falls back from UTF-8 to GB18030 for text that is not
+ * valid UTF-8.
+ */
+export const ON_HOST_AUTO_ENCODING = 'auto';
+
+/** The charsets offered for a kind (the on-host driver has no MySQL names). */
+export function databaseEncodingChoices(kind: DatabaseKind): readonly string[] {
+  if (kind === 'onhost') return ['utf8', 'gbk', 'gb18030', 'big5', 'latin1'];
+  return DATABASE_ENCODINGS;
 }
 
 /** Encoding to show as active; undefined means "driver default". */
@@ -28,5 +41,6 @@ export function currentDatabaseEncoding(
   explicit?: string,
 ): string | null {
   if (!supportsClientEncoding(kind)) return null;
-  return explicit && explicit.trim() ? explicit.trim() : 'utf8mb4';
+  if (explicit && explicit.trim()) return explicit.trim();
+  return kind === 'onhost' ? ON_HOST_AUTO_ENCODING : 'utf8mb4';
 }

@@ -31,6 +31,11 @@ export interface PortForwardingRule {
    * another feature (database connections), never saved with a rule.
    */
   verifyRemote?: boolean;
+  /**
+   * Runtime only: the forward ends in a terminal on the host itself instead of
+   * a TCP target (the on-host database driver). Never saved with a rule.
+   */
+  shellRelay?: boolean;
   // Auto-start: if true, this rule will automatically start when the app launches
   autoStart?: boolean;
   // Auto-reconnect: if true, the tunnel automatically reconnects (with bounded
