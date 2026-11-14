@@ -32,7 +32,7 @@ const topTabItemsSource = readFileSync(
 );
 const indexCss = readFileSync(fileURLToPath(new URL('../index.css', import.meta.url)), 'utf8');
 
-const TAB_TYPES = ['root', 'plugin-view', 'editor', 'session', 'workspace', 'logView'] as const;
+const TAB_TYPES = ['root', 'plugin-view', 'database', 'curl', 'note', 'editor', 'session', 'workspace', 'logView'] as const;
 const LOCALES = [
   { name: 'en', messages: en },
   { name: 'zh-CN', messages: zhCN },

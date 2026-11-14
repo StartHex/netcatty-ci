@@ -54,10 +54,13 @@ jobs:
           npm run check:plugin-contract
           npm run test:plugin-runtime
           npm run test:plugin-examples
-          node --test --import tsx components/settings/tabs/Plugin*.test.tsx
+          # The React suites run under a memory cap: a failing assertion on a
+          # DOM node can allocate gigabytes while it prints its diff, which
+          # used to take the runner down instead of reporting the failure.
+          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/Plugin*.test.tsx
 
       - name: Test
-        run: npm test
+        run: MEMORY_CAP=12G bash scripts/ci/with-memory-cap.sh npm test
 
       - name: Test SSH cipher negotiation in Electron's crypto runtime
         env:

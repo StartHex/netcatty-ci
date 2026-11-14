@@ -1128,6 +1128,7 @@ export const startPortForward = async (
       bindAddress: rule.bindAddress,
       remoteHost: rule.remoteHost,
       remotePort: rule.remotePort,
+      ...(rule.verifyRemote ? { verifyRemote: true } : {}),
       hostname: host.hostname,
       hostId: host.id,
       port: host.port,

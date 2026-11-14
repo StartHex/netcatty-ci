@@ -29,9 +29,18 @@ test("build workflow uploads and releases Arch pacman artifacts", () => {
   const releaseUploadPatterns = buildWorkflow.match(/release\/\*\.pacman/g) ?? [];
   assert.equal(
     releaseUploadPatterns.length,
-    3,
-    "mac/windows aggregate upload plus both Linux jobs must include release/*.pacman",
+    5,
+    "mac/windows aggregate upload, plus the aggregate and the pacman-only upload of both Linux jobs, must include release/*.pacman",
   );
+  // Untagged builds publish each package format as its own artifact, so one
+  // format can be downloaded without the rest.
+  for (const arch of ["x64", "arm64"]) {
+    assert.match(
+      buildWorkflow,
+      new RegExp(`name: netcatty-linux-${arch}-pacman\\n\\s+path: release/\\*\\.pacman`),
+      `Linux ${arch} job must upload the pacman package as its own artifact`,
+    );
+  }
   assert.ok(
     buildWorkflow.includes("artifacts/*.pacman"),
     "GitHub release file list must include downloaded pacman artifacts",

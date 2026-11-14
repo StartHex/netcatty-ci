@@ -149,7 +149,7 @@
     "@streamdown/cjk": "^1.0.2",
     "@streamdown/code": "^1.1.0",
     "@tailwindcss/vite": "^4.1.17",
-    "@tanstack/react-virtual": "^3.14.22",
+    "@tanstack/react-virtual": "^3.14.8",
     "@types/node": "^25.0.0",
     "@types/react-test-renderer": "^19.1.0",
     "@types/turndown": "^5.0.6",

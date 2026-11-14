@@ -65,6 +65,9 @@ function buildRule(
     remoteHost: remote.host,
     remotePort: remote.port,
     hostId: connection.sshHostId,
+    // The driver gets this port right away; an unreachable database should
+    // fail here with the reason, not as an unexplained dropped connection.
+    verifyRemote: true,
     status: 'inactive',
     createdAt: Date.now(),
   };

@@ -15,9 +15,17 @@ const { remoteSoftwareRequiresSingleChannel } = require("../../domain/singleChan
 const hostKeyVerifier = require("./hostKeyVerifier.cjs");
 const { createProxySocket, runWhenProxyConnectionReady } = require("./proxyUtils.cjs");
 const {
+  closeLateChannel,
   openBoundedForwardInCallback,
+  openBoundedForwardOut,
   openBoundedForwardOutCallback,
 } = require("./boundedSshChannelOpen.cjs");
+const {
+  isSafeRelayTarget,
+  isForwardProhibitedError,
+  openExecRelay,
+  verifyForwardTarget,
+} = require("./portForwardExecRelay.cjs");
 const { 
   buildAuthHandler, 
   createKeyboardInteractiveHandler, 
@@ -604,9 +612,16 @@ function bindPortForwardChannels({
     };
 
     if (type === "local") {
-      const server = net.createServer((socket) => {
-        const pipeEntry = trackTunnelPipe(tunnelState, socket);
-        pipeEntry.openStarted = true;
+      const relayAllowed = isSafeRelayTarget(remoteHost, remotePort);
+      // Opens the connection to the target. A server that refuses to forward
+      // (AllowTcpForwarding no) is asked to relay through a command instead,
+      // and the tunnel remembers that for its later connections.
+      const openTarget = (pipeEntry, callback) => {
+        const signal = pipeEntry?.openAbortController?.signal;
+        if (tunnelState.execRelay) {
+          openExecRelay(conn, remoteHost, remotePort, callback, { signal });
+          return;
+        }
         openBoundedForwardOutCallback(
           conn,
           bindAddress,
@@ -614,18 +629,37 @@ function bindPortForwardChannels({
           remoteHost,
           remotePort,
           (err, stream) => {
-            if (err) {
-              console.error(`[PortForward] Forward error:`, err.message);
-              destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
+            if (err && relayAllowed && isForwardProhibitedError(err) && !signal?.aborted) {
+              console.warn(`[PortForward] ${err.message}; relaying through a command on the SSH host instead`);
+              tunnelState.execRelay = true;
+              openExecRelay(conn, remoteHost, remotePort, callback, { signal });
               return;
             }
-            if (!attachTunnelPipeStream(tunnelState, pipeEntry, stream)) return;
-            socket.pipe(stream).pipe(socket);
-            socket.on("error", (e) => console.warn("[PortForward] Socket error:", e.message));
-            stream.on("error", (e) => console.warn("[PortForward] Stream error:", e.message));
+            callback(err, stream);
           },
-          { signal: pipeEntry?.openAbortController?.signal },
+          { signal },
         );
+      };
+      const server = net.createServer((socket) => {
+        const pipeEntry = trackTunnelPipe(tunnelState, socket);
+        pipeEntry.openStarted = true;
+        openTarget(pipeEntry, (err, stream) => {
+          if (err) {
+            console.error(`[PortForward] Forward error:`, err.message);
+            destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
+            return;
+          }
+          if (!attachTunnelPipeStream(tunnelState, pipeEntry, stream)) return;
+          socket.pipe(stream).pipe(socket);
+          socket.on("error", (e) => console.warn("[PortForward] Socket error:", e.message));
+          stream.on("error", (e) => console.warn("[PortForward] Stream error:", e.message));
+          if (typeof stream.relayStderr === "function") {
+            stream.once("close", () => {
+              const reason = stream.relayStderr();
+              if (reason) console.warn(`[PortForward] Relay to ${remoteHost}:${remotePort} ended: ${reason}`);
+            });
+          }
+        });
       });
 
       server.on("error", (err) => {
@@ -633,7 +667,7 @@ function bindPortForwardChannels({
         fail(err);
       });
 
-      server.listen(localPort, bindAddress, () => {
+      const activate = () => {
         console.log(`[PortForward] Local forwarding active: ${bindAddress}:${localPort} -> ${remoteHost}:${remotePort}`);
         try {
           // User may have cancelled while listen was pending (shared transport
@@ -672,6 +706,39 @@ function bindPortForwardChannels({
           try { server.close(); } catch { /* ignore */ }
           fail(regErr);
         }
+      };
+
+      server.listen(localPort, bindAddress, () => {
+        if (!tunnelState.verifyRemote) {
+          activate();
+          return;
+        }
+        // Callers that hand the port straight to a client (database tunnels)
+        // want to know now, with the reason, when the target is unreachable.
+        verifyForwardTarget({
+          conn,
+          host: remoteHost,
+          port: remotePort,
+          closeChannel: closeLateChannel,
+          openForwardOut: () => openBoundedForwardOut(conn, bindAddress, 0, remoteHost, remotePort, {
+            label: "SSH forwardOut check",
+            timeoutMs: 15000,
+            invalidateOnAbort: false,
+            invalidateOnTimeout: false,
+          }),
+        }).then(
+          ({ execRelay }) => {
+            if (execRelay) {
+              console.warn(`[PortForward] The SSH host refuses port forwarding; relaying ${remoteHost}:${remotePort} through a command`);
+              tunnelState.execRelay = true;
+            }
+            activate();
+          },
+          (verifyErr) => {
+            try { server.close(); } catch { /* ignore */ }
+            fail(verifyErr);
+          },
+        );
       });
       return;
     }
@@ -1243,6 +1310,9 @@ async function startPortForward(event, payload) {
     subscribers: new Map([[sender.id, sender]]),
     cancelled: false,
     sshTransportManaged: false,
+    // Check that the target is reachable before reporting a local forward
+    // as active (see verifyForwardTarget).
+    verifyRemote: payload.verifyRemote === true,
   };
   const sendStatus = (status, error = null) => {
     publishTunnelStatus(tunnelId, tunnelState, status, error);
