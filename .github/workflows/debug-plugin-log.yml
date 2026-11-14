@@ -20,79 +20,71 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Probe the suite under a memory cap
+      - name: Sample the stack of the runaway suite
         run: |
           set +e
-          echo "cpus=$(nproc)"; free -m; node -v; systemctl --version | head -1
-          mkdir -p /tmp/reports
-          monitor() {
-            while true; do
-              echo "--- $(date +%T) $(free -m | awk 'NR==2{print "used="$3" free="$4" avail="$7}') procs=$(ps -e --no-headers | wc -l)"
-              ps -eo pid,ppid,rss,pcpu,nlwp,etime,args --sort=-rss | sed -n 2,5p | cut -c1-170
-              sleep 2
-            done
+          cat > /tmp/watchdog.cjs <<'WATCHDOG'
+          // Samples the main thread's JavaScript stack from a worker, through the
+          // inspector, once the process has been running for WATCHDOG_AFTER_MS.
+          const { Worker, isMainThread } = require('node:worker_threads');
+          if (isMainThread && process.env.WATCHDOG_AFTER_MS) {
+            const worker = new Worker(`
+              const inspector = require('node:inspector');
+              const fs = require('node:fs');
+              const { workerData } = require('node:worker_threads');
+              let samples = 0;
+              const scripts = new Map();
+              setTimeout(() => {
+                const session = new inspector.Session();
+                session.connectToMainThread();
+                session.on('Debugger.scriptParsed', ({ params }) => { scripts.set(params.scriptId, params.url); });
+                session.on('Debugger.paused', ({ params }) => {
+                  samples += 1;
+                  const frames = params.callFrames.slice(0, workerData.depth).map((f) =>
+                    '  ' + (f.functionName || '<anonymous>') + '  ' + String(f.url || scripts.get(f.location.scriptId) || '').split('/').slice(-4).join('/') + ':' + (f.location.lineNumber + 1) + ':' + (f.location.columnNumber + 1));
+                  const top = params.callFrames[0];
+                  const finish = (memory) => {
+                    fs.writeSync(2, 'WATCHDOG sample ' + samples + ' frames=' + params.callFrames.length + ' mem=' + memory + '\\n' + frames.join('\\n') + '\\n');
+                    session.post('Debugger.resume');
+                  };
+                  if (!top) return finish('?');
+                  session.post('Debugger.evaluateOnCallFrame', {
+                    callFrameId: top.callFrameId,
+                    expression: 'JSON.stringify(process.memoryUsage())',
+                    returnByValue: true,
+                  }, (error, result) => finish(error ? String(error) : String(result && result.result && result.result.value)));
+                });
+                session.post('Debugger.enable', () => session.post('Debugger.pause'));
+                setInterval(() => { if (samples < workerData.max) session.post('Debugger.pause'); }, workerData.every);
+              }, workerData.after);
+            `, {
+              eval: true,
+              workerData: {
+                after: Number(process.env.WATCHDOG_AFTER_MS),
+                every: Number(process.env.WATCHDOG_EVERY_MS || 1500),
+                max: Number(process.env.WATCHDOG_MAX || 6),
+                depth: Number(process.env.WATCHDOG_DEPTH || 45),
+              },
+            });
+            worker.unref();
           }
-          # Pick a way to cap memory so a runaway process dies alone.
-          CAP=""
-          if sudo systemd-run --quiet --scope --uid="$(id -u)" --gid="$(id -g)" -p MemoryMax=3G -p MemorySwapMax=0 true; then
-            CAP="sudo systemd-run --quiet --scope --uid=$(id -u) --gid=$(id -g) -p MemoryMax=3G -p MemorySwapMax=0"
-          fi
-          echo "cap command: ${CAP:-<none>}"
-          monitor &
-          MON=$!
-          report() {
-            for p in $(pgrep -x node); do
-              if tr '\0' ' ' < /proc/$p/cmdline | grep -q "$1"; then
-                echo "requesting a report from node pid $p: $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-160)"
-                kill -USR2 "$p"
-              fi
-            done
-            sleep 4
-            for f in /tmp/reports/*.json; do
-              [ -f "$f" ] || continue
-              node -e '
-                const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-                console.log("REPORT", process.argv[1], "trigger=", r.header && r.header.trigger);
-                console.log("js stack:", JSON.stringify(r.javascriptStack, null, 1).slice(0, 6000));
-                console.log("heap:", JSON.stringify(r.javascriptHeap && { total: r.javascriptHeap.totalMemory, used: r.javascriptHeap.usedMemory, external: r.javascriptHeap.externalMemory }));
-                console.log("rss:", r.resourceUsage && r.resourceUsage.rss, "handles:", (r.libuv || []).length);
-                const kinds = {}; for (const h of r.libuv || []) kinds[h.type] = (kinds[h.type] || 0) + 1; console.log("libuv:", JSON.stringify(kinds));
-              ' "$f"
-              mv "$f" "$f.done"
-            done
-          }
-          export NODE_OPTIONS="--report-on-signal --report-signal=SIGUSR2 --report-directory=/tmp/reports"
-          for i in 1 2 3 4; do
-            echo "=== single file, run $i"
-            $CAP env PATH="$PATH" HOME="$HOME" NODE_OPTIONS="$NODE_OPTIONS" \
-              timeout -s KILL 60 node --import tsx components/settings/tabs/PluginLogSettings.test.tsx > /tmp/run-$i.log 2>&1 &
-            PID=$!
-            for s in $(seq 1 12); do sleep 1; kill -0 $PID 2>/dev/null || break; done
-            if kill -0 $PID 2>/dev/null; then
-              echo "run $i still running after 12s"
-              report PluginLogSettings
+          WATCHDOG
+          CAP="sudo systemd-run --quiet --scope --uid=$(id -u) --gid=$(id -g) -p MemoryMax=3G -p MemorySwapMax=0"
+          hung=0
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "=== run $i"
+            $CAP env PATH="$PATH" HOME="$HOME" WATCHDOG_AFTER_MS=5000 WATCHDOG_EVERY_MS=1200 WATCHDOG_MAX=4 WATCHDOG_DEPTH=70 \
+              timeout -s KILL 40 node --require /tmp/watchdog.cjs --import tsx components/settings/tabs/PluginLogSettings.test.tsx > /tmp/run-$i.log 2>&1
+            code=$?
+            echo "run $i exit=$code"
+            if [ "$code" != "0" ]; then
+              hung=$((hung + 1))
+              head -c 30000 /tmp/run-$i.log
+              echo
+            else
+              grep -c "^ok" /tmp/run-$i.log
             fi
-            wait $PID; echo "run $i exit=$?"
-            tail -25 /tmp/run-$i.log | cut -c1-300
+            if [ "$hung" -ge 2 ]; then break; fi
           done
-          echo "=== all plugin settings suites, one file at a time"
-          $CAP env PATH="$PATH" HOME="$HOME" NODE_OPTIONS="$NODE_OPTIONS" \
-            timeout -s KILL 240 node --test --test-concurrency=1 --import tsx components/settings/tabs/Plugin*.test.tsx > /tmp/run-all.log 2>&1 &
-          PID=$!
-          LAST=0
-          for s in $(seq 1 110); do
-            sleep 2; kill -0 $PID 2>/dev/null || break
-            SIZE=$(stat -c %s /tmp/run-all.log)
-            if [ "$SIZE" = "$LAST" ] && [ $((s % 6)) -eq 0 ]; then
-              echo "no output for a while (log at $SIZE bytes)"; grep "^# Subtest\|^ok\|^not ok" /tmp/run-all.log | tail -3
-              report "components/settings/tabs/Plugin"
-            fi
-            LAST=$SIZE
-          done
-          wait $PID; echo "all suites exit=$?"
-          grep -c "^ok" /tmp/run-all.log; grep "^not ok\|^# \(tests\|pass\|fail\|cancelled\)" /tmp/run-all.log | tail -12
-          tail -40 /tmp/run-all.log | cut -c1-300
-          kill $MON
-          echo "=== kernel log"
-          sudo dmesg | grep -i -E "oom|killed process|out of memory" | tail -20
+          echo "hung runs: $hung"
           true
