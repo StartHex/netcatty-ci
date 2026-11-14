@@ -13,6 +13,7 @@ import { editorTabStore, useEditorTab, type EditorTabId } from '../../applicatio
 import { useIsEditorTabActive } from '../../application/state/activeTabStore';
 import { useTerminalHostTreeLayoutWidth } from '../../application/state/terminalHostTreeStore';
 import type { HotkeyScheme, KeyBinding } from '../../domain/models';
+import { TAB_NAVIGATION_HOTKEY_SCOPE } from '../../domain/tabNavigationHotkeys';
 import type { Host } from '../../types';
 import { toast } from '../ui/toast';
 import { TextEditorPane } from './TextEditorPane';
@@ -113,6 +114,7 @@ const TextEditorTabViewImpl: React.FC<TextEditorTabViewProps> = ({
     <div
       style={getTextEditorTabShellStyle(isVisible, hostTreeLayoutWidth)}
       className="absolute top-0 right-0 bottom-0 min-h-0 flex flex-col bg-background"
+      {...TAB_NAVIGATION_HOTKEY_SCOPE}
     >
       <TextEditorPane
         chrome="tab"

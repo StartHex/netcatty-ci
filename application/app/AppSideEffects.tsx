@@ -1195,6 +1195,7 @@ export function AppSideEffects() {
       workspaceIds: workspaces.map((workspace) => workspace.id),
       logViewIds: logViews.map((logView) => logView.id),
       pluginViewTabIds: pluginViewTabs.map((tab) => tab.id),
+      workTabIds: orderedTabsRef.current,
       hasOpenDialog: Boolean(topmostDialogClose),
       closeTabShortcutEnabled: isPrimaryModifierWBinding(closeTabKeyStr, matchesKeyBinding, true),
     });

@@ -32,6 +32,12 @@ interface ResolveWindowCommandCloseIntentInput {
   workspaceIds: string[];
   logViewIds: string[];
   pluginViewTabIds?: string[];
+  /**
+   * Every closable tab in the tab bar, whatever its kind. Database, curl and
+   * note tabs are in none of the lists above; named here, Cmd+W closes the tab
+   * instead of falling through to the whole window.
+   */
+  workTabIds?: readonly string[];
   closeTabShortcutEnabled?: boolean;
   hasOpenDialog?: boolean;
 }
@@ -43,6 +49,7 @@ export function resolveWindowCommandCloseIntent({
   workspaceIds,
   logViewIds,
   pluginViewTabIds = [],
+  workTabIds = [],
   closeTabShortcutEnabled = true,
   hasOpenDialog = false,
 }: ResolveWindowCommandCloseIntentInput): WindowCommandCloseIntent {
@@ -72,6 +79,10 @@ export function resolveWindowCommandCloseIntent({
 
   if (activeTabId === 'vault' || activeTabId === 'sftp') {
     return { kind: 'closeWindow' };
+  }
+
+  if (workTabIds.includes(activeTabId)) {
+    return { kind: 'closeTab' };
   }
 
   return { kind: 'closeWindow' };

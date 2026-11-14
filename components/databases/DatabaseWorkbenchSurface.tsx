@@ -40,7 +40,7 @@ import { format as formatSqlText } from 'sql-formatter';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useDatabaseWorkbench, type DatabaseTab } from '../../application/state/useDatabaseWorkbench';
 import { ResultSetTabs } from './ResultSetTabs';
-import { databaseTabStore } from '../../application/state/databaseTabStore';
+import { shouldLeaveFocusAlone } from './editorFocus';
 import type { DatabaseConnection, DbCellValue, DbQueryResult } from '../../domain/models';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -176,6 +176,8 @@ interface DatabaseTabPaneProps {
   schemaWidth: number;
   onSchemaResizeStart: (event: React.MouseEvent) => void;
   autoFocus?: boolean;
+  /** Bumped each time the tab comes to the front; the editor takes the keyboard. */
+  focusRequest?: number;
   headerActions?: React.ReactNode;
 }
 
@@ -192,11 +194,23 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
   schemaWidth,
   onSchemaResizeStart,
   autoFocus,
+  focusRequest,
   headerActions,
 }) => {
   const { t } = useI18n();
   const columnWidthStore = useDatabaseColumnWidthStore();
   const editorRef = useRef<ScriptCodeEditorHandle | null>(null);
+
+  useEffect(() => {
+    if (!focusRequest) return undefined;
+    // One frame later the surface is visible and no longer inert, so the
+    // editor can actually take focus.
+    const frame = requestAnimationFrame(() => {
+      if (shouldLeaveFocusAlone(document.activeElement)) return;
+      editorRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusRequest]);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const [editorRatio, setEditorRatio] = useSplitRatio('netcatty.db.splitRatio', 0.38);
   const connection = useMemo(
@@ -1318,15 +1332,18 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
   tunnelDeps,
 }) => {
   const { t } = useI18n();
-  const workbench = useDatabaseWorkbench(connections, tunnelDeps);
-  const { tabs, activeTab } = workbench;
+  // `tabId` is the workbench tab the app has in front (null behind another
+  // kind of tab); the workbench follows it.
+  const workbench = useDatabaseWorkbench(connections, tunnelDeps, tabId);
+  const { tabs, activeTab, connectIfIdle } = workbench;
   const sqlHistory = useSqlHistory();
 
+  // Coming to a database tab hands the keyboard to its SQL editor, the way a
+  // terminal tab takes it: no click needed before typing or running.
+  const [editorFocusRequest, setEditorFocusRequest] = useState(0);
   useEffect(() => {
-    if (!tabId) return;
-    workbench.setActiveTabId(tabId);
-    databaseTabStore.markActive(tabId);
-  }, [tabId, workbench]);
+    if (tabId) setEditorFocusRequest((count) => count + 1);
+  }, [tabId]);
 
   const [schemaWidth, setSchemaWidth] = useState(190);
   const beginSchemaResize = useCallback(
@@ -1358,8 +1375,14 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
     if (secondaryTabId && !tabs.some((tab) => tab.id === secondaryTabId)) setSecondaryTabId(null);
   }, [tabs, secondaryTabId]);
 
+  // A restored tab picked for the second pane is on screen too.
+  const secondaryTabIdle = Boolean(tabId) && secondaryTab?.status === 'idle';
+  useEffect(() => {
+    if (secondaryTabIdle && secondaryTabId) connectIfIdle(secondaryTabId);
+  }, [secondaryTabIdle, secondaryTabId, connectIfIdle]);
+
   const openSecondaryPane = useCallback(
-    async (direction: 'horizontal' | 'vertical') => {
+    (direction: 'horizontal' | 'vertical') => {
       const active = workbench.activeTab;
       if (!active) return;
       setSplitDirection(direction);
@@ -1370,9 +1393,10 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
       }
       const connection = connections.find((entry) => entry.id === active.connectionId);
       if (!connection) return;
-      const newTabId = await workbench.openTab(connection, { forceNew: true });
+      const newTabId = workbench.openTab(connection, { forceNew: true });
+      // The new tab belongs in the second pane; the first keeps what it shows.
       workbench.setActiveTabId(active.id);
-      setSecondaryTabId(newTabId || null);
+      setSecondaryTabId(newTabId);
     },
     [connections, tabs, workbench],
   );
@@ -1416,7 +1440,7 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
             variant="ghost"
             className="h-6 w-6 p-0"
             aria-label={t('databases.workbench.splitRight')}
-            onClick={() => void openSecondaryPane('horizontal')}
+            onClick={() => openSecondaryPane('horizontal')}
           >
             <Columns2 className="h-3.5 w-3.5" />
           </Button>
@@ -1430,7 +1454,7 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
             variant="ghost"
             className="h-6 w-6 p-0"
             aria-label={t('databases.workbench.splitDown')}
-            onClick={() => void openSecondaryPane('vertical')}
+            onClick={() => openSecondaryPane('vertical')}
           >
             <Rows2 className="h-3.5 w-3.5" />
           </Button>
@@ -1519,6 +1543,7 @@ export const DatabaseWorkbenchSurface: React.FC<DatabaseWorkbenchSurfaceProps> =
           schemaWidth={schemaWidth}
           onSchemaResizeStart={beginSchemaResize}
           autoFocus
+          focusRequest={editorFocusRequest}
           headerActions={splitControls}
         />
       </div>

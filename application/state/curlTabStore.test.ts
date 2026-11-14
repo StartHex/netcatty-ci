@@ -80,3 +80,23 @@ test('persisted tabs drop invalid rows and keep the active tab', () => {
   assert.equal(filtered?.tabs.length, 1);
   assert.equal(filtered?.tabs[0].id, 'ok');
 });
+
+test('close requests raised in the same tick are all delivered, oldest first', () => {
+  for (let request = curlTabStore.getRequest(); request; request = curlTabStore.getRequest()) {
+    curlTabStore.takeRequest(request.nonce);
+  }
+  // "Close all" with three Curl tabs open.
+  curlTabStore.requestClose('curltab_1');
+  curlTabStore.requestClose('curltab_2');
+  curlTabStore.requestClose('curltab_3');
+
+  const handled: string[] = [];
+  for (let request = curlTabStore.getRequest(); request; request = curlTabStore.getRequest()) {
+    assert.equal(curlTabStore.takeRequest(request.nonce), true);
+    assert.equal(curlTabStore.takeRequest(request.nonce), false, 'a request is taken once');
+    if (request.type === 'close') handled.push(request.tabId);
+  }
+  assert.deepEqual(handled, ['curltab_1', 'curltab_2', 'curltab_3']);
+  assert.equal(curlTabStore.getRequest(), null);
+});
+
