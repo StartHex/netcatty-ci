@@ -20,35 +20,36 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Wrapper keeps the environment
-        env:
-          NODE_OPTIONS: --max-old-space-size=3072
-          PROBE_VALUE: "carried over, with spaces and \"quotes\""
+      - name: One suite, with and without the wrapper
         run: |
-          bash scripts/ci/with-memory-cap.sh node -e '
-            const os = require("os");
-            const report = {
-              uid: process.getuid(), user: os.userInfo().username, home: process.env.HOME, cwd: process.cwd(),
-              nodeOptions: process.env.NODE_OPTIONS, probe: process.env.PROBE_VALUE,
-              ci: process.env.CI, actions: process.env.GITHUB_ACTIONS, workspace: process.env.GITHUB_WORKSPACE,
-              runnerTemp: process.env.RUNNER_TEMP, envCount: Object.keys(process.env).length,
-              cgroup: require("fs").readFileSync("/proc/self/cgroup", "utf8").trim(),
-            };
-            console.log(JSON.stringify(report, null, 1));
-            const missing = ["nodeOptions", "probe", "ci", "actions", "workspace", "runnerTemp"].filter((key) => !report[key]);
-            if (missing.length) { console.error("missing: " + missing.join(", ")); process.exit(1); }
-            if (!/\.scope$/.test(report.cgroup)) { console.error("not in a scope"); process.exit(1); }
-          '
-          echo "outer env count: $(env | wc -l)"
-          ls -la "${TMPDIR:-/tmp}" | grep -c "tmp\." || true
+          set +e
+          echo "=== plain"
+          node --test --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/plain.log 2>&1; echo "exit=$?"
+          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/plain.log | cut -c1-160
+          echo "=== wrapped"
+          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/wrapped.log 2>&1; echo "exit=$?"
+          cut -c1-400 /tmp/wrapped.log | head -80
+          echo "=== wrapped, direct (no test runner child)"
+          bash scripts/ci/with-memory-cap.sh node --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/wrapped-direct.log 2>&1; echo "exit=$?"
+          cut -c1-400 /tmp/wrapped-direct.log | head -60
+          echo "=== limits and ids, plain"
+          bash -c 'ulimit -a | tr "\n" ";"; echo; id; umask; tty; ls -la /proc/self/fd | wc -l'
+          echo "=== limits and ids, wrapped"
+          bash scripts/ci/with-memory-cap.sh bash -c 'ulimit -a | tr "\n" ";"; echo; id; umask; tty; ls -la /proc/self/fd | wc -l'
+          echo "=== env only in one of the two"
+          env | cut -d= -f1 | sort > /tmp/env-plain.txt
+          bash scripts/ci/with-memory-cap.sh env | cut -d= -f1 | sort > /tmp/env-wrapped.txt
+          diff /tmp/env-plain.txt /tmp/env-wrapped.txt
+          true
       - name: All plugin settings suites under the cap
         run: |
           set +e
           bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/Plugin*.test.tsx > /tmp/all.log 2>&1
           code=$?
           grep "^# \(tests\|pass\|fail\|cancelled\|duration_ms\)" /tmp/all.log
-          grep -n "^not ok" -A 30 /tmp/all.log | cut -c1-260 | head -120
-          exit $code
+          grep -n "^not ok" -B 45 /tmp/all.log | cut -c1-300 | head -150
+          echo "exit=$code"
+          true
       - name: Virtualized list suites with the locked react-virtual
         run: |
           set +e
