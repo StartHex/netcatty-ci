@@ -50,6 +50,25 @@ class FakeMonacoHTMLElement extends FakeHTMLElement {
   }
 }
 
+/** The SQL / file editor of a work tab whose surface opted in to tab navigation. */
+class FakeWorkTabMonacoHTMLElement extends FakeHTMLElement {
+  tagName = 'TEXTAREA';
+
+  closest(selector: string): FakeWorkTabMonacoHTMLElement | null {
+    return selector.includes('monaco') || selector.includes('data-hotkey-tab-navigation') ? this : null;
+  }
+}
+
+/** A plain input of such a tab (a table filter, the request URL of the HTTP client). */
+class FakeWorkTabInputHTMLElement {
+  tagName = 'INPUT';
+  isContentEditable = false;
+
+  closest(selector: string): FakeWorkTabInputHTMLElement | null {
+    return selector.includes('data-hotkey-tab-navigation') ? this : null;
+  }
+}
+
 const previousHTMLElement = globalThis.HTMLElement;
 globalThis.HTMLElement = FakeHTMLElement as unknown as typeof HTMLElement;
 
@@ -1031,4 +1050,118 @@ test('toggleHostTree uses the host list toggle only while that list can show', (
 test('host list shortcut calls the same store toggle as the toolbar button', () => {
   const source = readFileSync(new URL('./app/AppSideEffects.tsx', import.meta.url), 'utf8');
   assert.match(source, /toggleHostTree:\s*\(\)\s*=>\s*terminalHostTreeStore\.toggle\(\)/);
+});
+
+function pressFromTarget(
+  target: object,
+  init: { key: string; code: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean; isComposing?: boolean },
+  options: { hotkeyScheme?: 'pc' | 'mac'; keyBindings?: typeof DEFAULT_KEY_BINDINGS } = {},
+) {
+  const actions: string[] = [];
+  let prevented = false;
+  let stopped = false;
+  handleGlobalHotkeyKeyDownImpl(() => ({
+    HOTKEY_DEBUG: false,
+    closeTabKeyStr: options.hotkeyScheme === 'mac' ? '⌘ + W' : 'Ctrl + W',
+    executeHotkeyAction: (action: string) => {
+      actions.push(action);
+      return true;
+    },
+    hotkeyScheme: options.hotkeyScheme ?? 'pc',
+    keyBindings: options.keyBindings ?? DEFAULT_KEY_BINDINGS,
+    matchesKeyBinding,
+  }), {
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...init,
+    target,
+    composedPath: () => [target],
+    preventDefault: () => { prevented = true; },
+    stopPropagation: () => { stopped = true; },
+  } as unknown as KeyboardEvent);
+  return { actions, prevented, stopped };
+}
+
+test('tab switching works while typing in a database, curl, note or file-editor tab', () => {
+  for (const target of [new FakeWorkTabMonacoHTMLElement(), new FakeWorkTabInputHTMLElement()]) {
+    const next = pressFromTarget(target, { key: 'Tab', code: 'Tab', ctrlKey: true });
+    assert.deepEqual(next.actions, ['nextTab']);
+    assert.equal(next.prevented, true, 'the editor must not also act on the chord');
+    assert.equal(next.stopped, true);
+
+    assert.deepEqual(
+      pressFromTarget(target, { key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true }).actions,
+      ['prevTab'],
+    );
+    assert.deepEqual(
+      pressFromTarget(target, { key: '2', code: 'Digit2', ctrlKey: true }).actions,
+      ['switchToTab'],
+    );
+    assert.deepEqual(
+      pressFromTarget(target, { key: ']', code: 'BracketRight', metaKey: true, shiftKey: true }, { hotkeyScheme: 'mac' }).actions,
+      ['nextTab'],
+    );
+  }
+});
+
+test('tab switching still stays out of text fields that are not a work tab', () => {
+  // The vault search box, a dialog field, an editor that did not opt in.
+  for (const target of [new FakeInputHTMLElement(), new FakeMonacoHTMLElement()]) {
+    const result = pressFromTarget(target, { key: 'Tab', code: 'Tab', ctrlKey: true });
+    assert.deepEqual(result.actions, []);
+    assert.equal(result.prevented, false);
+    assert.deepEqual(pressFromTarget(target, { key: '2', code: 'Digit2', ctrlKey: true }).actions, []);
+  }
+});
+
+test('only tab switching gets through a work tab text field', (t) => {
+  const editor = new FakeWorkTabMonacoHTMLElement();
+  // The close-tab chord looks for an open dialog first.
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { querySelectorAll: () => [] },
+  });
+  t.after(() => {
+    if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+  });
+  // Ctrl+W deletes a word in a shell and a database tab has no unsaved-changes
+  // prompt: closing stays unavailable while typing.
+  const close = pressFromTarget(editor, { key: 'w', code: 'KeyW', ctrlKey: true });
+  assert.deepEqual(close.actions, []);
+  assert.equal(close.prevented, false);
+  // New local terminal.
+  assert.deepEqual(pressFromTarget(editor, { key: 't', code: 'KeyT', ctrlKey: true }).actions, []);
+  // Typing a digit, or picking an IME candidate with one, is not a shortcut.
+  assert.deepEqual(pressFromTarget(editor, { key: '2', code: 'Digit2' }).actions, []);
+  assert.deepEqual(
+    pressFromTarget(editor, { key: '2', code: 'Digit2', ctrlKey: true, isComposing: true }).actions,
+    [],
+  );
+  // AltGr+8 types "[" on a German layout.
+  assert.deepEqual(
+    pressFromTarget(editor, { key: '[', code: 'Digit8', ctrlKey: true, altKey: true }).actions,
+    [],
+  );
+});
+
+test('another action sharing a tab chord does not ride through the text field', () => {
+  // Someone put "new tab" on the same chord as "next tab": inside the editor
+  // only the tab switch may run, whichever comes first in the list.
+  const keyBindings = [
+    ...DEFAULT_KEY_BINDINGS.filter((binding) => binding.action !== 'newTab'),
+  ];
+  keyBindings.unshift({
+    ...DEFAULT_KEY_BINDINGS.find((binding) => binding.action === 'newTab')!,
+    pc: 'Ctrl + Tab',
+  });
+  const result = pressFromTarget(
+    new FakeWorkTabMonacoHTMLElement(),
+    { key: 'Tab', code: 'Tab', ctrlKey: true },
+    { keyBindings },
+  );
+  assert.deepEqual(result.actions, ['nextTab']);
 });

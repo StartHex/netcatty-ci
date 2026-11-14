@@ -8,6 +8,7 @@ import { fromNoteTabId, isNoteTabId, noteTabStore, useNoteTabIds } from '../stat
 import { useNotesStore } from '../state/notesStore';
 import { useTerminalHostTreeLayoutWidth } from '../state/terminalHostTreeStore';
 import { isTerminalContentTabSurface } from './workTabSurface';
+import { TAB_NAVIGATION_HOTKEY_SCOPE } from '../../domain/tabNavigationHotkeys';
 import { cn } from '../../lib/utils';
 import { ConnectionLog, TerminalTheme } from '../../types';
 import { LazyLoadBoundary } from '../../components/ui/lazy-load-boundary';
@@ -278,6 +279,7 @@ export const DatabaseWorkbenchMount: React.FC<{
     <div
       className={cn('absolute inset-0', isActive ? 'z-20' : '')}
       data-inactive-app-surface={isActive ? undefined : 'true'}
+      {...TAB_NAVIGATION_HOTKEY_SCOPE}
       // `inert` also keeps the hidden surface out of focus order and the a11y
       // tree, which avoids extra work when the user tabs back to a host.
       inert={isActive ? undefined : true}
@@ -315,6 +317,7 @@ export const CurlClientMount: React.FC<{
     <div
       className={cn('absolute inset-0', isActive ? 'z-20' : '')}
       data-inactive-app-surface={isActive ? undefined : 'true'}
+      {...TAB_NAVIGATION_HOTKEY_SCOPE}
       style={containerStyle}
     >
       <LazyLoadBoundary name="Curl client" resetKey="curl">
@@ -372,6 +375,7 @@ export const NoteTabsMount: React.FC<{
       className={cn('absolute inset-0 bg-background', isActive ? 'z-20' : '')}
       data-inactive-app-surface={isActive ? undefined : 'true'}
       data-section="note-tab-surface"
+      {...TAB_NAVIGATION_HOTKEY_SCOPE}
       style={containerStyle}
     >
       <LazyLoadBoundary name="Notes" resetKey="note-tabs">

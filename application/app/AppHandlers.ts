@@ -18,6 +18,7 @@ import { isHostTreeWorkTabSurface } from './workTabSurface';
 import { tabShortcutDigitFromEvent } from '../../domain/models/keyBindings';
 import { isPortForwardingAutoReconnectEnabled } from '../../domain/portForwardingReconnect';
 import { buildNumberShortcutTabTargets } from './tabShortcutTargets';
+import { TAB_NAVIGATION_ACTIONS, isTabNavigationFromTextField } from '../../domain/tabNavigationHotkeys';
 import { captureInheritedCwd } from '../state/inheritedCwd';
 import { fromEditorTabId, isEditorTabId } from '../state/activeTabStore';
 import { databaseTabStore, fromDatabaseTabId, isDatabaseTabId } from '../state/databaseTabStore';
@@ -290,6 +291,14 @@ export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: Keybo
     const hostTreeKeyStr = hostTreeBinding ? (isMac ? hostTreeBinding.mac : hostTreeBinding.pc) : null;
     const isHostTreeHotkey = hostTreeKeyStr ? matchesKeyBinding(e, hostTreeKeyStr, isMac) : false;
 
+    // A database, curl, note or file-editor tab is a text field nearly all the
+    // time. Its tab-switching chords get through so the tab can be left with
+    // the keyboard, like a terminal tab; nothing else does.
+    const tabNavigationFromTextField =
+      (isFormElement || isMonacoElement)
+      && !isXtermInput
+      && isTabNavigationFromTextField({ event: e, target, keyBindings, isMac, matchesKeyBinding });
+
     if (
       (isFormElement || isMonacoElement)
       && !isXtermInput
@@ -298,6 +307,7 @@ export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: Keybo
       && !isPaneZoomHotkey
       && !(isMonacoElement && isHostTreeHotkey)
       && !forwardedNativeShortcutEvents.has(e)
+      && !tabNavigationFromTextField
     ) {
       return;
     }
@@ -320,6 +330,9 @@ export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: Keybo
     for (const binding of keyBindings) {
       const keyStr = isMac ? binding.mac : binding.pc;
       if (!matchesKeyBinding(e, keyStr, isMac)) continue;
+      // Let through for tab navigation only: another action on the same chord
+      // keeps staying out of the text field.
+      if (tabNavigationFromTextField && !TAB_NAVIGATION_ACTIONS.has(binding.action)) continue;
       // IME-filtered keys retain their physical code (e.g. Linux Unicode entry).
       // Let composition handle them instead of treating them as opacity toggles.
       if (binding.action === 'toggleOpacity' && (e.isComposing || e.keyCode === 229 || e.key === 'Process')) {
