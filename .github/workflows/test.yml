@@ -54,7 +54,9 @@ jobs:
           npm run check:plugin-contract
           npm run test:plugin-runtime
           npm run test:plugin-examples
-          node --test --import tsx components/settings/tabs/Plugin*.test.tsx
+          # One file at a time: run together, these React suites have exhausted
+          # the runner's memory and taken the whole job down with them.
+          node --test --test-concurrency=1 --import tsx components/settings/tabs/Plugin*.test.tsx
 
       - name: Test
         run: npm test
