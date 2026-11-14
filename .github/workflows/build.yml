@@ -377,7 +377,46 @@ jobs:
           node scripts/test-windows-setup-shell.cjs --shell "$shell_exe" --install
           mv -f "$shell_exe" "release/$(basename "$shell_exe")"
 
+      # Check builds: one artifact per package, so a single format can be
+      # downloaded without the others. Tagged releases keep the combined
+      # artifact the release job consumes.
+      - name: Upload Windows installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'windows' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-windows-x64-installer
+          path: |
+            release/*-win-x64.exe
+            !release/*-portable-*
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 dmg
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'macos' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-dmg
+          path: release/*-arm64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 dmg
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.name == 'macos' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-dmg
+          path: release/*-x64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-${{ matrix.name }}
@@ -686,7 +725,52 @@ jobs:
       - name: Verify packaged rpm artifact
         run: bash scripts/verify-linux-rpm-artifact.sh x86_64
 
+      - name: Upload Linux deb
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-deb
+          path: release/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-rpm
+          path: release/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-appimage
+          path: release/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-pacman
+          path: release/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-linux-x64
@@ -827,7 +911,52 @@ jobs:
       - name: Verify packaged rpm artifact
         run: bash scripts/verify-linux-rpm-artifact.sh aarch64
 
+      - name: Upload Linux deb
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-deb
+          path: release/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-rpm
+          path: release/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-appimage
+          path: release/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-arm64-pacman
+          path: release/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: netcatty-linux-arm64

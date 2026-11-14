@@ -17,15 +17,12 @@ jobs:
           - name: windows-x64
             os: windows-latest
             pack_script: pack:win-x64
-            artifact_name: netcatty-windows-x64
           - name: macos
             os: macos-latest
             pack_script: pack:mac
-            artifact_name: netcatty-macos
           - name: linux-x64
             os: ubuntu-22.04
             pack_script: pack:linux-x64
-            artifact_name: netcatty-linux-x64
 
     env:
       # Fail instead of shipping a package without the JDBC support jar.
@@ -157,12 +154,105 @@ jobs:
           find release-upload -maxdepth 1 -type f -print
           test "$(find release-upload -maxdepth 1 -type f | wc -l)" -gt 0
 
-      - name: Upload artifacts
+      # One artifact per package, so a single format can be downloaded
+      # without the others.
+      - name: Upload Windows installer
+        if: matrix.name == 'windows-x64'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: release-upload/*
-          if-no-files-found: error
+          name: netcatty-windows-x64-installer
+          path: release-upload/*.exe
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 dmg
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-dmg
+          path: release-upload/*-arm64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 dmg
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-dmg
+          path: release-upload/*-x64.dmg
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS arm64 zip
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-arm64-zip
+          path: release-upload/*-arm64.zip
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload macOS x64 zip
+        if: matrix.name == 'macos'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-macos-x64-zip
+          path: release-upload/*-x64.zip
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux deb
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-deb
+          path: release-upload/*.deb
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-rpm
+          path: release-upload/*.rpm
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-appimage
+          path: release-upload/*.AppImage
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-pacman
+          path: release-upload/*.pacman
+          if-no-files-found: ignore
+          # Packages are already compressed.
+          compression-level: 0
           retention-days: 7
 
       - name: Verify macOS bundle signature
