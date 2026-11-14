@@ -204,3 +204,26 @@ jobs:
         env:
           NETCATTY_LINE_TOOLS_SCREENSHOT: "1"
         run: node scripts/terminal-line-tools.live.cjs
+
+  onhost-db-agent:
+    name: onhost-db-agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # What SSH hosts actually have: the Python 2.7 of older enterprise
+        # distributions, the 3.6 that came after it, and a current release.
+        python: ["2.7", "3.6", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The on-host database agent is typed into a shell on the SSH host and
+      # runs on whatever Python is there. Hosted runners no longer carry
+      # Python 2, so each interpreter comes as its official image, which also
+      # has the C compiler the test-double client libraries are built with.
+      - name: Run the on-host database agent's test suite on Python ${{ matrix.python }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src "python:${{ matrix.python }}" \
+            python electron/bridges/dbAgent/tests/agent_selftest.py

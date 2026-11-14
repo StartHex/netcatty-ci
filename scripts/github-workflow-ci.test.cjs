@@ -353,3 +353,21 @@ test("electron-builder retries Fetch API server errors", () => {
   assert.match(appBuilderPatch, /e\?\.response\?\.status/);
   assert.match(appBuilderPatch, /responseStatus >= 500/);
 });
+
+test("the on-host database agent is tested on the Python versions SSH hosts have", () => {
+  const start = testWorkflow.indexOf("\n  onhost-db-agent:");
+  assert.notEqual(start, -1, "test.yml has the onhost-db-agent job");
+  const job = testWorkflow.slice(start);
+  // Python 2.7 is why this is a job of its own: the agent must keep running
+  // on hosts that never got a newer interpreter.
+  assert.match(job, /python: \["2\.7", "3\.6", "3\.\d+"\]/);
+  assert.match(job, /fail-fast: false/);
+  assert.match(
+    job,
+    /docker run --rm -v "\$PWD:\/src:ro" -w \/src "python:\$\{\{ matrix\.python \}\}" \\\s*\n\s*python electron\/bridges\/dbAgent\/tests\/agent_selftest\.py/,
+  );
+  assert.ok(
+    fs.existsSync(path.join(__dirname, "..", "electron", "bridges", "dbAgent", "tests", "agent_selftest.py")),
+    "the suite the job runs exists",
+  );
+});
