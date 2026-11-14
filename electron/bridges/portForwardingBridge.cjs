@@ -19,7 +19,13 @@ const {
   openBoundedForwardInCallback,
   openBoundedForwardOut,
   openBoundedForwardOutCallback,
+  openBoundedSshShellCallback,
 } = require("./boundedSshChannelOpen.cjs");
+const {
+  RELAY_PTY,
+  authorizeRelayClient,
+  createRelayToken,
+} = require("./portForwardShellRelay.cjs");
 const {
   isSafeRelayTarget,
   isForwardProhibitedError,
@@ -618,6 +624,14 @@ function bindPortForwardChannels({
       // and the tunnel remembers that for its later connections.
       const openTarget = (pipeEntry, callback) => {
         const signal = pipeEntry?.openAbortController?.signal;
+        if (tunnelState.shellRelay) {
+          // The far end is a terminal on the host itself (portForwardShellRelay).
+          openBoundedSshShellCallback(conn, RELAY_PTY, {}, callback, {
+            signal,
+            label: "SSH shell relay",
+          });
+          return;
+        }
         if (tunnelState.execRelay) {
           openExecRelay(conn, remoteHost, remotePort, callback, { signal });
           return;
@@ -640,8 +654,7 @@ function bindPortForwardChannels({
           { signal },
         );
       };
-      const server = net.createServer((socket) => {
-        const pipeEntry = trackTunnelPipe(tunnelState, socket);
+      const servePipe = (socket, pipeEntry, head) => {
         pipeEntry.openStarted = true;
         openTarget(pipeEntry, (err, stream) => {
           if (err) {
@@ -650,6 +663,8 @@ function bindPortForwardChannels({
             return;
           }
           if (!attachTunnelPipeStream(tunnelState, pipeEntry, stream)) return;
+          // Bytes the client sent along with its relay token.
+          if (head && head.length > 0) stream.write(head);
           socket.pipe(stream).pipe(socket);
           socket.on("error", (e) => console.warn("[PortForward] Socket error:", e.message));
           stream.on("error", (e) => console.warn("[PortForward] Stream error:", e.message));
@@ -660,6 +675,24 @@ function bindPortForwardChannels({
             });
           }
         });
+      };
+      const server = net.createServer((socket) => {
+        const pipeEntry = trackTunnelPipe(tunnelState, socket);
+        if (!tunnelState.shellRelay) {
+          servePipe(socket, pipeEntry, null);
+          return;
+        }
+        // A shell on the host is only opened for a client that knows the token.
+        authorizeRelayClient(socket, tunnelState.shellRelay.token).then(
+          (head) => {
+            if (pipeEntry.closed) return;
+            servePipe(socket, pipeEntry, head);
+          },
+          (authErr) => {
+            console.warn(`[PortForward] Shell relay client refused: ${authErr.message}`);
+            destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
+          },
+        );
       });
 
       server.on("error", (err) => {
@@ -668,7 +701,9 @@ function bindPortForwardChannels({
       });
 
       const activate = () => {
-        console.log(`[PortForward] Local forwarding active: ${bindAddress}:${localPort} -> ${remoteHost}:${remotePort}`);
+        console.log(tunnelState.shellRelay
+          ? `[PortForward] Shell relay active: ${bindAddress}:${localPort} -> a terminal on the SSH host`
+          : `[PortForward] Local forwarding active: ${bindAddress}:${localPort} -> ${remoteHost}:${remotePort}`);
         try {
           // User may have cancelled while listen was pending (shared transport
           // path). Do not resurrect a stopped tunnel or leave the port open.
@@ -701,7 +736,12 @@ function bindPortForwardChannels({
               return undefined;
             }
           })();
-          resolve({ tunnelId, success: true, localPort: boundPort });
+          resolve({
+            tunnelId,
+            success: true,
+            localPort: boundPort,
+            ...(tunnelState.shellRelay ? { relayToken: tunnelState.shellRelay.token } : {}),
+          });
         } catch (regErr) {
           try { server.close(); } catch { /* ignore */ }
           fail(regErr);
@@ -709,7 +749,7 @@ function bindPortForwardChannels({
       };
 
       server.listen(localPort, bindAddress, () => {
-        if (!tunnelState.verifyRemote) {
+        if (!tunnelState.verifyRemote || tunnelState.shellRelay) {
           activate();
           return;
         }
@@ -1247,6 +1287,16 @@ async function startPortForward(event, payload) {
   // channel on that same TCP connection. Dial a private SSH session instead.
   const allowTransportReuse = reuseTransport !== false && payload.singleChannelSsh !== true;
 
+  // A shell relay hands out terminals on the host; it never listens beyond
+  // this machine, token or not.
+  if (payload.shellRelay === true && !["127.0.0.1", "::1", "localhost"].includes(String(bindAddress))) {
+    return {
+      tunnelId,
+      success: false,
+      error: "A shell relay only listens on the loopback interface.",
+    };
+  }
+
   // The rule is the durable identity; tunnelId is only one renderer's
   // attempt. Reuse an in-flight/live tunnel so two windows cannot create
   // duplicate listeners for the same saved rule.
@@ -1313,6 +1363,9 @@ async function startPortForward(event, payload) {
     // Check that the target is reachable before reporting a local forward
     // as active (see verifyForwardTarget).
     verifyRemote: payload.verifyRemote === true,
+    // A local forward into the host's own shell instead of a TCP target; only
+    // on loopback, and only for clients that present the token.
+    shellRelay: payload.shellRelay === true && type === "local" ? { token: createRelayToken() } : null,
   };
   const sendStatus = (status, error = null) => {
     publishTunnelStatus(tunnelId, tunnelState, status, error);

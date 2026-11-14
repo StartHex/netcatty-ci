@@ -238,6 +238,10 @@ declare global {
     // Local forwards only: check that the target is reachable through the
     // host before reporting the forward as active.
     verifyRemote?: boolean;
+    // Local forwards only: connections get a terminal on the host itself
+    // instead of a TCP target. The start result then carries `relayToken`,
+    // which a client must send as its first line.
+    shellRelay?: boolean;
     // SSH connection details
     hostname: string;
     hostId?: string;
@@ -278,6 +282,8 @@ declare global {
     tunnelId: string;
     success: boolean;
     localPort?: number;
+    /** Shell relays only: the first line a client of the local port must send. */
+    relayToken?: string;
     cancelled?: boolean;
     blockedByCleanup?: boolean;
     reused?: boolean;
