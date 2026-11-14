@@ -77,8 +77,9 @@ import { copyTextWithFeedback } from '../curl/clipboard';
 import { useClipboardBackend } from '../../application/state/useClipboardBackend';
 import { filterTables } from '../../domain/database/tableFilter';
 import {
-  DATABASE_ENCODINGS,
+  ON_HOST_AUTO_ENCODING,
   currentDatabaseEncoding,
+  databaseEncodingChoices,
 } from '../../domain/database/encoding';
 import { readSqlFile, saveDatabaseBinaryFile, saveSqlFile } from '@/infrastructure/services/databaseService.ts';
 import { netcattyBridge } from '@/infrastructure/services/netcattyBridge.ts';
@@ -618,8 +619,10 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
 
   const changeEncoding = async (value: string) => {
     if (!connection) return;
+    // "Automatic" is the on-host driver's default, not a charset to save.
+    const saved = value === ON_HOST_AUTO_ENCODING ? undefined : value;
     onUpdateConnections?.((prev) =>
-      prev.map((entry) => (entry.id === connection.id ? { ...entry, clientEncoding: value } : entry)),
+      prev.map((entry) => (entry.id === connection.id ? { ...entry, clientEncoding: saved } : entry)),
     );
     await workbench.setEncoding(tab.id, value);
   };
@@ -655,7 +658,12 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {DATABASE_ENCODINGS.map((encoding) => (
+            {tab.kind === 'onhost' ? (
+              <SelectItem value={ON_HOST_AUTO_ENCODING} className="text-xs">
+                {t('databases.onhost.encodingAuto')}
+              </SelectItem>
+            ) : null}
+            {databaseEncodingChoices(tab.kind).map((encoding) => (
               <SelectItem key={encoding} value={encoding} className="text-xs">
                 {encoding}
               </SelectItem>
@@ -1011,7 +1019,11 @@ const DatabaseTabPane: React.FC<DatabaseTabPaneProps> = ({
             <div className="min-w-0 space-y-0.5">
               <p className="whitespace-pre-wrap break-words font-medium">{tab.error}</p>
               {tab.errorDetail?.detail ? (
-                <p className="opacity-80">{tab.errorDetail.detail}</p>
+                // Driver detail is a sentence; what a host printed is several
+                // lines of terminal output and has to keep its line breaks.
+                <p className="max-h-40 overflow-auto whitespace-pre-wrap break-words opacity-80">
+                  {tab.errorDetail.detail}
+                </p>
               ) : null}
               {tab.errorDetail?.hint ? (
                 <p className="opacity-80">{tab.errorDetail.hint}</p>

@@ -35,6 +35,13 @@ test('quoting follows the dialect', () => {
   assert.equal(quoteIdentifier('order', 'postgresql'), '"order"');
   assert.equal(quoteIdentifier('order', 'mysql'), '`order`');
   assert.equal(quoteIdentifier('we"ird', 'oracle'), '"we""ird"');
+  // The on-host client libraries take plain names only; a name that is not
+  // plain is still quoted rather than pasted into the statement as it is.
+  assert.equal(quoteIdentifier('T_SMALL', 'onhost'), 'T_SMALL');
+  assert.equal(quoteIdentifier('app_user$1', 'onhost'), 'app_user$1');
+  assert.equal(quoteIdentifier('id; drop table t', 'onhost'), '"id; drop table t"');
+  assert.equal(quoteIdentifier('we"ird', 'onhost'), '"we""ird"');
+  assert.equal(quoteIdentifier('1st', 'onhost'), '"1st"');
 });
 
 test('literals quote text and pass numbers through', () => {
