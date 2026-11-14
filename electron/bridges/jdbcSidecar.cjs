@@ -48,7 +48,9 @@ function extractBundledJar(jarInsideAsar) {
         return null;
       }
     })();
-    if (!existing || existing.length !== source.length) fs.writeFileSync(target, source);
+    // Compare the bytes, not the size: a jar rebuilt from changed sources is
+    // often the same length, and a stale copy would keep running old code.
+    if (!existing || !existing.equals(source)) fs.writeFileSync(target, source);
     return target;
   } catch {
     return undefined;
