@@ -176,3 +176,46 @@ test("Cmd+W closes the window when nothing else is active", () => {
     { kind: "closeWindow" },
   );
 });
+
+test("Cmd+W closes a database, curl or note tab instead of the window", () => {
+  const workTabIds = ["s1", "database:db_1", "curl:curltab_1", "note:note_1"];
+  for (const activeTabId of ["database:db_1", "curl:curltab_1", "note:note_1"]) {
+    assert.deepEqual(
+      resolveWindowCommandCloseIntent({
+        activeTabId,
+        editorTabIds: [],
+        sessionIds: ["s1"],
+        workspaceIds: [],
+        logViewIds: [],
+        workTabIds,
+      }),
+      { kind: "closeTab" },
+      activeTabId,
+    );
+  }
+});
+
+test("a tab that is not in the tab bar still closes the window, and so do the root pages", () => {
+  assert.deepEqual(
+    resolveWindowCommandCloseIntent({
+      activeTabId: "database:gone",
+      editorTabIds: [],
+      sessionIds: [],
+      workspaceIds: [],
+      logViewIds: [],
+      workTabIds: ["database:db_1"],
+    }),
+    { kind: "closeWindow" },
+  );
+  assert.deepEqual(
+    resolveWindowCommandCloseIntent({
+      activeTabId: "vault",
+      editorTabIds: [],
+      sessionIds: [],
+      workspaceIds: [],
+      logViewIds: [],
+      workTabIds: ["vault", "database:db_1"],
+    }),
+    { kind: "closeWindow" },
+  );
+});
