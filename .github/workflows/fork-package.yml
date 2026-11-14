@@ -20,9 +20,6 @@ jobs:
           - name: macos
             os: macos-latest
             pack_script: pack:mac
-          - name: linux-x64
-            os: ubuntu-22.04
-            pack_script: pack:linux-x64
 
     env:
       # Fail instead of shipping a package without the JDBC support jar.
@@ -56,10 +53,6 @@ jobs:
         if: matrix.name == 'windows-x64'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install Linux packaging dependencies
-        if: matrix.name == 'linux-x64'
-        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
-
       - name: Set package version
         shell: bash
         run: |
@@ -77,10 +70,6 @@ jobs:
           echo "Setting version to ${VERSION} (commit ${GITHUB_SHA:0:7})"
           npm pkg set version="${VERSION}"
           echo "FORK_VERSION=${VERSION}" >> "$GITHUB_ENV"
-
-      - name: Prepare node-pty Linux runtime
-        if: matrix.name == 'linux-x64'
-        run: bash scripts/ensure-node-pty-linux.sh prepare x64
 
       - name: Fetch bundled mosh-client
         run: npm run fetch:mosh:dev
@@ -118,14 +107,6 @@ jobs:
           # installed for all users.
           node scripts/test-windows-setup-scenarios.cjs --shell "$shell_exe"
 
-      - name: Verify node-pty Linux runtime
-        if: matrix.name == 'linux-x64'
-        run: bash scripts/ensure-node-pty-linux.sh verify x64
-
-      - name: Verify Linux deb artifact
-        if: matrix.name == 'linux-x64'
-        run: bash scripts/verify-linux-deb-artifact.sh amd64
-
       # The JVM cannot open a jar inside app.asar. If the unpacked copy is
       # missing the app falls back to a copy cached in the user's profile.
       - name: Verify the JDBC support jar is shipped unpacked
@@ -146,9 +127,6 @@ jobs:
               ;;
             macos)
               find release -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' \) -exec cp -v '{}' release-upload/ ';'
-              ;;
-            linux-x64)
-              find release -maxdepth 1 -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.pacman' \) -exec cp -v '{}' release-upload/ ';'
               ;;
           esac
           find release-upload -maxdepth 1 -type f -print
@@ -211,50 +189,6 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-      - name: Upload Linux deb
-        if: matrix.name == 'linux-x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: netcatty-linux-x64-deb
-          path: release-upload/*.deb
-          if-no-files-found: ignore
-          # Packages are already compressed.
-          compression-level: 0
-          retention-days: 7
-
-      - name: Upload Linux rpm
-        if: matrix.name == 'linux-x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: netcatty-linux-x64-rpm
-          path: release-upload/*.rpm
-          if-no-files-found: ignore
-          # Packages are already compressed.
-          compression-level: 0
-          retention-days: 7
-
-      - name: Upload Linux AppImage
-        if: matrix.name == 'linux-x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: netcatty-linux-x64-appimage
-          path: release-upload/*.AppImage
-          if-no-files-found: ignore
-          # Packages are already compressed.
-          compression-level: 0
-          retention-days: 7
-
-      - name: Upload Linux pacman
-        if: matrix.name == 'linux-x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: netcatty-linux-x64-pacman
-          path: release-upload/*.pacman
-          if-no-files-found: ignore
-          # Packages are already compressed.
-          compression-level: 0
-          retention-days: 7
-
       - name: Verify macOS bundle signature
         if: matrix.name == 'macos'
         shell: bash
@@ -293,24 +227,6 @@ jobs:
           # Keep the download page short: only the three newest builds stay.
           node scripts/prune-fork-release-assets.cjs "$tag" 3
 
-      - name: Publish Linux x64 release assets
-        if: matrix.name == 'linux-x64'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="fork-linux-x64-latest"
-          title="Fork Linux x64 latest"
-          notes="Latest Linux x64 packages (AppImage, deb, rpm, pacman) produced by the fork packaging workflow.
-          Versions count upwards (1.1.90-fork.N), so installing a newer deb or rpm over an older one is an upgrade."
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "$title" --notes "$notes" --prerelease
-          else
-            gh release create "$tag" --title "$title" --notes "$notes" --prerelease
-          fi
-          gh release upload "$tag" release-upload/* --clobber
-          node scripts/prune-fork-release-assets.cjs "$tag" 3
-
       - name: Publish macOS release assets
         if: matrix.name == 'macos'
         shell: bash
@@ -345,6 +261,357 @@ jobs:
           macOS builds are ad-hoc signed: after installing run
           xattr -dr com.apple.quarantine /Applications/Netcatty.app"
           # The three platform jobs race to create the same release.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Netcatty ${FORK_VERSION}" --notes "$notes" --target "$GITHUB_SHA" \
+              || gh release view "$tag" >/dev/null
+          fi
+          gh release upload "$tag" release-upload/* --clobber
+
+  # Linux x64 is built inside AlmaLinux 8 (glibc 2.28), exactly like the
+  # build-linux-x64 job in build.yml, whose steps this job copies. Built on
+  # the Ubuntu runner, the native modules need that runner's newer glibc and
+  # the app does not start on older distributions (UOS, Deepin, Kylin, RHEL 8,
+  # Debian 10/11). Keep the copied steps in sync with build.yml.
+  package-linux-x64:
+    name: package-linux-x64
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/almalinuxorg/almalinux:8
+    env:
+      # Fail instead of shipping a package without the JDBC support jar.
+      NETCATTY_REQUIRE_JDBC_SIDECAR: "1"
+      GITHUB_TOKEN: ${{ github.token }}
+      ELECTRON_BUILDER_PUBLISH: never
+      MOSH_BIN_OWNER: binaricat
+      ET_BIN_OWNER: binaricat
+      npm_config_arch: x64
+      npm_config_target_arch: x64
+      LDFLAGS: "-static-libstdc++ -static-libgcc"
+    steps:
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y --setopt=retries=4 --setopt=timeout=30 install epel-release
+          dnf -y --setopt=retries=4 --setopt=timeout=30 install \
+            curl ca-certificates \
+            gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ make \
+            python3.11 python3.11-pip \
+            git file rpm-build binutils cpio elfutils \
+            libarchive gzip bzip2 xz zstd tar which findutils \
+            dpkg fakeroot \
+            fuse fuse-libs gtk3 nss libXScrnSaver libXtst alsa-lib \
+            at-spi2-atk libdrm mesa-libgbm libX11 libX11-xcb libxcb \
+            mesa-libGL pango cairo \
+            java-17-openjdk-devel
+          # Fork: the JDK compiles the JDBC support jar the database module
+          # needs; without it the package ships with JDBC connections broken.
+          # gcc-toolset-13: C++20 for Electron 42 natives; still links glibc 2.28.
+          GCC_TOOLSET_ROOT="/opt/rh/gcc-toolset-13/root"
+          echo "PATH=${GCC_TOOLSET_ROOT}/usr/bin:${PATH}" >> "${GITHUB_ENV}"
+          echo "CC=${GCC_TOOLSET_ROOT}/usr/bin/gcc" >> "${GITHUB_ENV}"
+          echo "CXX=${GCC_TOOLSET_ROOT}/usr/bin/g++" >> "${GITHUB_ENV}"
+          echo "DEVTOOLSET_ROOTPATH=${GCC_TOOLSET_ROOT}" >> "${GITHUB_ENV}"
+          export PATH="${GCC_TOOLSET_ROOT}/usr/bin:${PATH}"
+          gcc --version
+          g++ --version
+          # AlmaLinux 8's libarchive package is often library-only in minimal
+          # images (no /usr/bin/bsdtar). electron-builder pacman packaging needs
+          # bsdtar; pull a Debian tools package that runs on glibc 2.28.
+          # Prefer Buster (published as +deb10u1 on archive.debian.org).
+          if [[ ! -x /usr/bin/bsdtar ]]; then
+            echo "bsdtar missing; installing CLI from Debian libarchive-tools"
+            mkdir -p /tmp/bsdtar-deb
+            BSDTAR_DEB_URLS=(
+              "http://archive.debian.org/debian/pool/main/liba/libarchive/libarchive-tools_3.3.3-4+deb10u1_amd64.deb"
+              "http://archive.debian.org/debian/pool/main/liba/libarchive/libarchive-tools_3.2.2-2+deb9u2_amd64.deb"
+            )
+            BSDTAR_DEB_OK=0
+            for url in "${BSDTAR_DEB_URLS[@]}"; do
+              echo "trying ${url}"
+              if curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+                -o /tmp/libarchive-tools.deb "${url}"; then
+                BSDTAR_DEB_OK=1
+                break
+              fi
+              echo "download failed for ${url}"
+            done
+            if [[ "${BSDTAR_DEB_OK}" -ne 1 ]]; then
+              echo "::error::Could not download Debian libarchive-tools for bsdtar"
+              exit 1
+            fi
+            dpkg-deb -x /tmp/libarchive-tools.deb /tmp/bsdtar-deb
+            install -m 0755 /tmp/bsdtar-deb/usr/bin/bsdtar /usr/local/bin/bsdtar-bin
+            # Prefer system libarchive.so if present; fall back to the deb's.
+            if [[ ! -e /usr/lib64/libarchive.so.13 && -d /tmp/bsdtar-deb/usr/lib/x86_64-linux-gnu ]]; then
+              mkdir -p /usr/local/lib/bsdtar-libs
+              cp -a /tmp/bsdtar-deb/usr/lib/x86_64-linux-gnu/libarchive.so* /usr/local/lib/bsdtar-libs/ 2>/dev/null || true
+            fi
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              'if [[ -d /usr/local/lib/bsdtar-libs ]]; then' \
+              '  export LD_LIBRARY_PATH=/usr/local/lib/bsdtar-libs' \
+              'fi' \
+              'exec /usr/local/bin/bsdtar-bin "$@"' \
+              > /usr/local/bin/bsdtar
+            chmod +x /usr/local/bin/bsdtar
+          fi
+          # Some fpm paths still look for xzmt even when payload compression
+          # is gzip; provide a multi-thread xz shim.
+          printf '%s\n' '#!/bin/sh' 'exec /usr/bin/xz -T0 "$@"' > /usr/local/bin/xzmt
+          chmod +x /usr/local/bin/xzmt
+          # electron-builder's portable fpm injects its own LD_LIBRARY_PATH.
+          # System tools (rpmbuild, bsdtar, ...) then exit 127 under that path.
+          # Wrap every packaging helper so child processes see a clean env.
+          # Use printf (not a bare heredoc): unindented heredoc body breaks GHA YAML.
+          wrap_clean_env() {
+            local name="$1"
+            local real=""
+            if [[ -x "/usr/bin/${name}" ]]; then
+              real="/usr/bin/${name}"
+            elif [[ -x "/usr/local/bin/${name}-bin" ]]; then
+              real="/usr/local/bin/${name}-bin"
+            elif command -v "${name}" >/dev/null 2>&1; then
+              real="$(command -v "${name}")"
+            else
+              return 0
+            fi
+            # Don't wrap our own wrapper recursively.
+            if [[ "${real}" == /usr/local/bin/* && "${name}" != "bsdtar" ]]; then
+              return 0
+            fi
+            if [[ "${name}" == "bsdtar" && -x /usr/local/bin/bsdtar-bin ]]; then
+              real="/usr/local/bin/bsdtar-bin"
+            fi
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              "exec ${real} \"\$@\"" \
+              > "/usr/local/bin/${name}"
+            chmod +x "/usr/local/bin/${name}"
+          }
+          for cmd in rpmbuild bsdtar bsdcpio tar gzip xz strip cpio; do
+            wrap_clean_env "${cmd}"
+          done
+          # Re-apply bsdtar wrapper with optional lib path for the deb-extracted binary.
+          if [[ -x /usr/local/bin/bsdtar-bin ]]; then
+            printf '%s\n' \
+              '#!/bin/bash' \
+              'unset LD_LIBRARY_PATH' \
+              'if [[ -d /usr/local/lib/bsdtar-libs ]]; then' \
+              '  export LD_LIBRARY_PATH=/usr/local/lib/bsdtar-libs' \
+              'fi' \
+              'exec /usr/local/bin/bsdtar-bin "$@"' \
+              > /usr/local/bin/bsdtar
+            chmod +x /usr/local/bin/bsdtar
+          fi
+          # Fail early with diagnostics if packaging tools are missing.
+          for tool in rpmbuild bsdtar strip gzip xz xzmt; do
+            if ! command -v "${tool}" >/dev/null 2>&1; then
+              echo "::error::Required packaging tool not found: ${tool}"
+              ls -la /usr/bin/bsd* /usr/local/bin/bsd* 2>/dev/null || true
+              rpm -ql libarchive 2>/dev/null | head -n 40 || true
+              exit 1
+            fi
+            echo "found ${tool}: $(command -v "${tool}")"
+          done
+          rpmbuild --version
+          bsdtar --version | head -n 1
+          # Official Node 22 linux-x64 tarball (same major as other package jobs).
+          NODE_VERSION="$(curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+            https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt \
+            | awk '/node-v[0-9.]+-linux-x64\.tar\.xz$/{print $2; exit}' \
+            | sed -E 's/^node-(v[0-9.]+)-linux-x64\.tar\.xz$/\1/')"
+          if [[ -z "${NODE_VERSION}" ]]; then
+            echo "::error::Could not resolve latest Node 22 linux-x64 tarball version."
+            exit 1
+          fi
+          echo "Installing Node ${NODE_VERSION} from nodejs.org"
+          curl -fsSL --retry 4 --retry-connrefused --connect-timeout 20 --max-time 300 \
+            "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz" \
+            | tar -xJ -C /usr/local --strip-components=1
+          node -v
+          npm -v
+          # node-gyp 12 needs Python >=3.8; AlmaLinux 8 default is older.
+          alternatives --set python3 /usr/bin/python3.11 || ln -sfn /usr/bin/python3.11 /usr/local/bin/python3
+          python3 --version
+          echo "PYTHON=/usr/bin/python3.11" >> "${GITHUB_ENV}"
+          echo "npm_config_python=/usr/bin/python3.11" >> "${GITHUB_ENV}"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install deps
+        run: |
+          python3 --version
+          g++ --version
+          npm ci
+
+      - name: Set package version
+        shell: bash
+        run: |
+          # Same version as the other platforms of this run.
+          UPSTREAM_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")"
+          if [[ ! "$UPSTREAM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::fork-version.json upstreamVersion must be x.y.z, got '${UPSTREAM_VERSION}'"
+            exit 1
+          fi
+          VERSION="${UPSTREAM_VERSION}-fork.${GITHUB_RUN_NUMBER}"
+          echo "Setting version to ${VERSION} (commit ${GITHUB_SHA:0:7})"
+          npm pkg set version="${VERSION}"
+
+      - name: Prepare node-pty Linux runtime
+        env:
+          npm_config_arch: x64
+        run: bash scripts/ensure-node-pty-linux.sh prepare x64
+
+      - name: Fetch bundled mosh-client
+        run: npm run fetch:mosh:dev
+
+      - name: Fetch bundled et-client
+        run: npm run fetch:et:dev
+
+      - name: Build package
+        env:
+          npm_config_arch: x64
+          ELECTRON_BUILDER_PUBLISH: "never"
+          # Natives are already rebuilt. Prefer system packaging tools so
+          # rpmbuild brp scripts do not pick up a toolset-only binary, and so
+          # /usr/local/bin/rpmbuild (clean-env wrapper) wins over /usr/bin.
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          set -euo pipefail
+          command -v node
+          command -v rpmbuild
+          command -v bsdtar
+          command -v gzip
+          command -v xzmt
+          for cmd in rpmbuild bsdtar; do
+            if ! head -n 2 "$(command -v "${cmd}")" | grep -q 'unset LD_LIBRARY_PATH'; then
+              echo "::warning::${cmd} on PATH is not the clean-env wrapper; packaging may fail with exit 127"
+            fi
+          done
+          npm run pack:linux-x64
+
+      - name: Test packaged SSH cipher negotiation
+        run: node scripts/test-packaged-ssh-ciphers.cjs
+
+      - name: Verify packaged node-pty Linux runtime
+        run: bash scripts/ensure-node-pty-linux.sh verify x64
+
+      - name: Verify packaged deb artifact
+        run: bash scripts/verify-linux-deb-artifact.sh amd64
+
+      - name: Verify packaged rpm artifact
+        run: bash scripts/verify-linux-rpm-artifact.sh x86_64
+
+      - name: Verify the JDBC support jar is shipped unpacked
+        shell: bash
+        run: |
+          jar="$(find release -type f -name 'netcatty-jdbc-sidecar.jar' -path '*app.asar.unpacked*' | head -n 1)"
+          test -n "$jar" || { echo "netcatty-jdbc-sidecar.jar is not in app.asar.unpacked"; exit 1; }
+          ls -l "$jar"
+
+      # The reason this job runs in a container: nothing in the package may
+      # need a newer glibc than the oldest supported distribution has.
+      - name: Verify native modules run on glibc 2.28
+        shell: bash
+        run: node scripts/check-linux-glibc-floor.cjs release/linux-unpacked 2.28
+
+      - name: Upload Linux deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-deb
+          path: release/*.deb
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux rpm
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-rpm
+          path: release/*.rpm
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-appimage
+          path: release/*.AppImage
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Linux pacman
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-linux-x64-pacman
+          path: release/*.pacman
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  # The build container has no GitHub CLI, so publishing is its own job.
+  publish-linux-x64:
+    name: publish-linux-x64
+    needs: package-linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: netcatty-linux-x64-*
+          path: release-upload
+          merge-multiple: true
+
+      - name: Publish Linux x64 release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l release-upload
+          tag="fork-linux-x64-latest"
+          title="Fork Linux x64 latest"
+          notes="Latest Linux x64 packages (AppImage, deb, rpm, pacman) produced by the fork packaging workflow.
+          Built against glibc 2.28, so they also run on older distributions.
+          Versions count upwards (1.1.90-fork.N), so installing a newer deb or rpm over an older one is an upgrade."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release upload "$tag" release-upload/* --clobber
+          node scripts/prune-fork-release-assets.cjs "$tag" 3
+
+      - name: Publish versioned release (default branch only)
+        if: github.ref_name == github.event.repository.default_branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FORK_VERSION="$(node -p "require('./fork-version.json').upstreamVersion")-fork.${GITHUB_RUN_NUMBER}"
+          tag="v${FORK_VERSION}"
+          notes="Netcatty fork build ${FORK_VERSION} (commit ${GITHUB_SHA:0:7}).
+          macOS builds are ad-hoc signed: after installing run
+          xattr -dr com.apple.quarantine /Applications/Netcatty.app"
+          # The platform jobs race to create the same release.
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --title "Netcatty ${FORK_VERSION}" --notes "$notes" --target "$GITHUB_SHA" \
               || gh release view "$tag" >/dev/null
