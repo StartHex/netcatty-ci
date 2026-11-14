@@ -503,6 +503,9 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
   const request = useCurlTabRequest();
   useEffect(() => {
     if (!request) return;
+    // Taking it makes this the only run that acts on the request, and brings
+    // the next one in line forward ("close all" queues one per tab).
+    if (!curlTabStore.takeRequest(request.nonce)) return;
     if (request.type === 'open') {
       if (request.requestId) openSaved(request.requestId);
       else openBlank();
@@ -511,7 +514,6 @@ export function useHttpClient({ requests, onUpdateRequests }: UseHttpClientOptio
     } else if (request.type === 'duplicate') {
       duplicateTab(request.tabId);
     }
-    curlTabStore.clearRequest(request.nonce);
   }, [request, openSaved, openBlank, closeTab, duplicateTab]);
 
   const savedRequests = useMemo(() => sortCurlRequests(requests ?? []), [requests]);

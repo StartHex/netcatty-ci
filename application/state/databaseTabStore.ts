@@ -46,14 +46,24 @@ export type DatabaseTabRequest =
   | { type: 'duplicate'; tabId: string; nonce: number }
   | null;
 
+type PendingDatabaseTabRequest = Exclude<DatabaseTabRequest, null>;
+/** `Omit` applied to each variant of the union on its own. */
+type WithoutNonce<Request> = Request extends unknown ? Omit<Request, 'nonce'> : never;
+
 type Listener = () => void;
 
 const EMPTY_TABS: readonly DatabaseTabSummary[] = Object.freeze([]);
+const NO_REQUESTS: readonly PendingDatabaseTabRequest[] = Object.freeze([]);
 
 class DatabaseTabStore {
   private tabs: readonly DatabaseTabSummary[] = EMPTY_TABS;
   private activeTabId: string | null = null;
-  private request: DatabaseTabRequest = null;
+  /**
+   * Requests wait in line: "close all" raises one close per tab in the same
+   * tick, and a single slot would keep only the last of them.
+   */
+  private requests: readonly PendingDatabaseTabRequest[] = NO_REQUESTS;
+  private nextNonce = 1;
   private listeners = new Set<Listener>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private hydratedSql = new Map<string, string>();
@@ -61,7 +71,8 @@ class DatabaseTabStore {
   getTabs = (): readonly DatabaseTabSummary[] => this.tabs;
   getTab = (id: string): DatabaseTabSummary | undefined => this.tabs.find((tab) => tab.id === id);
   getActiveTabId = (): string | null => this.activeTabId;
-  getRequest = (): DatabaseTabRequest => this.request;
+  /** The oldest request nobody has taken yet. */
+  getRequest = (): DatabaseTabRequest => this.requests[0] ?? null;
 
   subscribe = (listener: Listener): (() => void) => {
     this.listeners.add(listener);
@@ -123,14 +134,17 @@ class DatabaseTabStore {
     return { tabs, ...(state.activeTabId ? { activeTabId: state.activeTabId } : {}) };
   };
 
+  private enqueue = (request: WithoutNonce<PendingDatabaseTabRequest>): void => {
+    this.requests = [...this.requests, { ...request, nonce: this.nextNonce++ } as PendingDatabaseTabRequest];
+    this.notify();
+  };
+
   requestOpen = (connectionId: string, options?: { forceNew?: boolean }): void => {
-    this.request = {
+    this.enqueue({
       type: 'open',
       connectionId,
       ...(options?.forceNew ? { forceNew: true } : {}),
-      nonce: Date.now() + Math.random(),
-    };
-    this.notify();
+    });
   };
 
   markActive = (tabId: string): void => {
@@ -140,19 +154,29 @@ class DatabaseTabStore {
   };
 
   requestClose = (tabId: string): void => {
-    this.request = { type: 'close', tabId, nonce: Date.now() + Math.random() };
-    this.notify();
+    this.enqueue({ type: 'close', tabId });
   };
 
   /** Open a second tab on the same connection carrying the same SQL draft. */
   requestDuplicate = (tabId: string): void => {
-    this.request = { type: 'duplicate', tabId, nonce: Date.now() + Math.random() };
-    this.notify();
+    this.enqueue({ type: 'duplicate', tabId });
+  };
+
+  /**
+   * Claims a request for handling. Returns false when it is no longer waiting,
+   * so a handler that runs twice for the same request acts on it once. Taking
+   * one brings the next in line to the front.
+   */
+  takeRequest = (nonce: number): boolean => {
+    const remaining = this.requests.filter((request) => request.nonce !== nonce);
+    if (remaining.length === this.requests.length) return false;
+    this.requests = remaining.length === 0 ? NO_REQUESTS : remaining;
+    if (remaining.length > 0) this.notify();
+    return true;
   };
 
   clearRequest = (nonce: number): void => {
-    if (this.request?.nonce !== nonce) return;
-    this.request = null;
+    this.takeRequest(nonce);
   };
 
   activate = (tabId: string): void => {

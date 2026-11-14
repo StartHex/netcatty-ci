@@ -43,20 +43,31 @@ export type CurlTabRequest =
   | { type: 'duplicate'; tabId: string; nonce: number }
   | null;
 
+type PendingCurlTabRequest = Exclude<CurlTabRequest, null>;
+/** `Omit` applied to each variant of the union on its own. */
+type WithoutNonce<Request> = Request extends unknown ? Omit<Request, 'nonce'> : never;
+
 type Listener = () => void;
 
 const EMPTY_TABS: readonly CurlTabSummary[] = Object.freeze([]);
+const NO_REQUESTS: readonly PendingCurlTabRequest[] = Object.freeze([]);
 
 class CurlTabStore {
   private tabs: readonly CurlTabSummary[] = EMPTY_TABS;
   private activeTabId: string | null = null;
-  private request: CurlTabRequest = null;
+  /**
+   * Requests wait in line: "close all" raises one close per tab in the same
+   * tick, and a single slot would keep only the last of them.
+   */
+  private requests: readonly PendingCurlTabRequest[] = NO_REQUESTS;
+  private nextNonce = 1;
   private listeners = new Set<Listener>();
 
   getTabs = (): readonly CurlTabSummary[] => this.tabs;
   getTab = (id: string): CurlTabSummary | undefined => this.tabs.find((tab) => tab.id === id);
   getActiveTabId = (): string | null => this.activeTabId;
-  getRequest = (): CurlTabRequest => this.request;
+  /** The oldest request nobody has taken yet. */
+  getRequest = (): CurlTabRequest => this.requests[0] ?? null;
 
   subscribe = (listener: Listener): (() => void) => {
     this.listeners.add(listener);
@@ -111,13 +122,16 @@ class CurlTabStore {
     return { tabs, ...(state.activeTabId ? { activeTabId: state.activeTabId } : {}) };
   };
 
+  private enqueue = (request: WithoutNonce<PendingCurlTabRequest>): void => {
+    this.requests = [...this.requests, { ...request, nonce: this.nextNonce++ } as PendingCurlTabRequest];
+    this.notify();
+  };
+
   requestOpen = (requestId?: string): void => {
-    this.request = {
+    this.enqueue({
       type: 'open',
       ...(requestId ? { requestId } : {}),
-      nonce: Date.now() + Math.random(),
-    };
-    this.notify();
+    });
   };
 
   markActive = (tabId: string): void => {
@@ -127,19 +141,29 @@ class CurlTabStore {
   };
 
   requestClose = (tabId: string): void => {
-    this.request = { type: 'close', tabId, nonce: Date.now() + Math.random() };
-    this.notify();
+    this.enqueue({ type: 'close', tabId });
   };
 
   /** Open an unsaved copy of the tab's current draft in a new tab. */
   requestDuplicate = (tabId: string): void => {
-    this.request = { type: 'duplicate', tabId, nonce: Date.now() + Math.random() };
-    this.notify();
+    this.enqueue({ type: 'duplicate', tabId });
+  };
+
+  /**
+   * Claims a request for handling. Returns false when it is no longer waiting,
+   * so a handler that runs twice for the same request acts on it once. Taking
+   * one brings the next in line to the front.
+   */
+  takeRequest = (nonce: number): boolean => {
+    const remaining = this.requests.filter((request) => request.nonce !== nonce);
+    if (remaining.length === this.requests.length) return false;
+    this.requests = remaining.length === 0 ? NO_REQUESTS : remaining;
+    if (remaining.length > 0) this.notify();
+    return true;
   };
 
   clearRequest = (nonce: number): void => {
-    if (this.request?.nonce !== nonce) return;
-    this.request = null;
+    this.takeRequest(nonce);
   };
 
   activate = (tabId: string): void => {

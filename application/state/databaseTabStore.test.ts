@@ -82,3 +82,57 @@ test('persisted drafts survive a reload and drop malformed rows', () => {
   const filtered = databaseTabStore.loadPersisted();
   assert.deepEqual(filtered?.tabs.map((tab) => tab.id), ['db_3']);
 });
+
+function drainRequests(): void {
+  for (let request = databaseTabStore.getRequest(); request; request = databaseTabStore.getRequest()) {
+    databaseTabStore.takeRequest(request.nonce);
+  }
+}
+
+test('requests raised in the same tick are all delivered, oldest first', () => {
+  drainRequests();
+  let notified = 0;
+  const unsubscribe = databaseTabStore.subscribe(() => {
+    notified += 1;
+  });
+
+  // "Close all" with three database tabs open.
+  databaseTabStore.requestClose('db_1');
+  databaseTabStore.requestClose('db_2');
+  databaseTabStore.requestClose('db_3');
+  assert.equal(notified, 3);
+
+  const handled: string[] = [];
+  for (let request = databaseTabStore.getRequest(); request; request = databaseTabStore.getRequest()) {
+    const waiting = notified;
+    assert.equal(databaseTabStore.takeRequest(request.nonce), true);
+    if (request.type === 'close') handled.push(request.tabId);
+    // Whoever handles requests is told when another one is waiting behind.
+    assert.equal(notified, databaseTabStore.getRequest() ? waiting + 1 : waiting);
+  }
+  assert.deepEqual(handled, ['db_1', 'db_2', 'db_3']);
+  assert.equal(databaseTabStore.getRequest(), null);
+  unsubscribe();
+});
+
+test('a request is taken once, however often the handler runs', () => {
+  drainRequests();
+  databaseTabStore.requestDuplicate('db_7');
+  const request = databaseTabStore.getRequest();
+  assert.equal(request?.type, 'duplicate');
+  assert.equal(databaseTabStore.takeRequest(request!.nonce), true);
+  assert.equal(databaseTabStore.takeRequest(request!.nonce), false, 'the second run must not duplicate again');
+  assert.equal(databaseTabStore.getRequest(), null);
+});
+
+test('every request gets a nonce of its own', () => {
+  drainRequests();
+  databaseTabStore.requestOpen('conn_1');
+  databaseTabStore.requestOpen('conn_1');
+  const first = databaseTabStore.getRequest()!;
+  databaseTabStore.takeRequest(first.nonce);
+  const second = databaseTabStore.getRequest()!;
+  assert.notEqual(second.nonce, first.nonce);
+  drainRequests();
+});
+
