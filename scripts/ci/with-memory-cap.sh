@@ -28,22 +28,29 @@ oom_kills() {
   awk '$1 == "oom_kill" { print $2; found = 1 } END { if (!found) print 0 }' /proc/vmstat 2>/dev/null || echo 0
 }
 
-# sudo only starts the scope: the command runs as the calling user, in the
-# calling directory, with the calling environment. sudo resets the environment
-# (and not every sudo honours -E), so it is handed over through a private file.
+# sudo only starts the scope. The command itself runs as the calling user with
+# that user's groups, in the calling directory, with exactly the calling
+# environment: sudo resets the environment (and not every sudo honours -E), so
+# it is handed over through a private file and restored into an empty one.
 environment_file="$(mktemp)"
 trap 'rm -f "${environment_file}"' EXIT
 export -p > "${environment_file}"
 
+bash_path="$(command -v bash)"
+env_path="$(command -v env)"
+setpriv_path="$(command -v setpriv || true)"
+
 run_capped() {
   sudo -n systemd-run --quiet --scope --collect \
-    --uid="$(id -u)" --gid="$(id -g)" \
     -p "MemoryMax=${limit}" -p MemorySwapMax=0 -p OOMPolicy=continue \
-    -- bash -c 'source "$1"; shift; exec "$@"' with-memory-cap "${environment_file}" "$@"
+    -- "${setpriv_path}" --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
+    "${env_path}" -i "${bash_path}" -c 'source "$1"; shift; exec "$@"' \
+    with-memory-cap "${environment_file}" "$@"
 }
 
 can_cap() {
   [ "${limit}" != "off" ] || return 1
+  [ -n "${setpriv_path}" ] || return 1
   command -v systemd-run >/dev/null 2>&1 || return 1
   command -v sudo >/dev/null 2>&1 || return 1
   run_capped true >/dev/null 2>&1

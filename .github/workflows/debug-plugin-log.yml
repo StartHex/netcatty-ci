@@ -20,50 +20,31 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: One suite, with and without the wrapper
+      - name: Wrapper changes nothing but the cgroup
+        env:
+          PROBE_VALUE: "carried over, with spaces and \"quotes\""
         run: |
           set +e
-          echo "=== plain"
-          node --test --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/plain.log 2>&1; echo "exit=$?"
-          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/plain.log | cut -c1-160
-          echo "=== wrapped"
-          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/wrapped.log 2>&1; echo "exit=$?"
-          cut -c1-400 /tmp/wrapped.log | head -80
-          echo "=== wrapped, direct (no test runner child)"
-          bash scripts/ci/with-memory-cap.sh node --import tsx components/settings/tabs/PluginBrandIcon.test.tsx > /tmp/wrapped-direct.log 2>&1; echo "exit=$?"
-          cut -c1-400 /tmp/wrapped-direct.log | head -60
-          echo "=== limits and ids, plain"
-          bash -c 'ulimit -a | tr "\n" ";"; echo; id; umask; tty; ls -la /proc/self/fd | wc -l'
-          echo "=== limits and ids, wrapped"
-          bash scripts/ci/with-memory-cap.sh bash -c 'ulimit -a | tr "\n" ";"; echo; id; umask; tty; ls -la /proc/self/fd | wc -l'
-          echo "=== env only in one of the two"
-          env | cut -d= -f1 | sort > /tmp/env-plain.txt
-          bash scripts/ci/with-memory-cap.sh env | cut -d= -f1 | sort > /tmp/env-wrapped.txt
-          diff /tmp/env-plain.txt /tmp/env-wrapped.txt
+          probe='ulimit -a | tr "\n" ";"; echo; id; umask; echo "probe=$PROBE_VALUE"; docker ps --format "{{.ID}}" >/dev/null 2>&1 && echo docker-ok || echo docker-denied; cat /proc/self/cgroup'
+          bash -c "$probe" > /tmp/plain.txt 2>&1
+          bash scripts/ci/with-memory-cap.sh bash -c "$probe" > /tmp/wrapped.txt 2>&1
+          echo "=== plain"; cat /tmp/plain.txt | cut -c1-400
+          echo "=== wrapped"; cat /tmp/wrapped.txt | cut -c1-400
+          echo "=== difference (expected: only the cgroup line)"
+          diff /tmp/plain.txt /tmp/wrapped.txt
+          env | sort | grep -v "^_=" > /tmp/env-plain.txt
+          bash scripts/ci/with-memory-cap.sh env | sort | grep -v "^_=" > /tmp/env-wrapped.txt
+          echo "=== environment difference (expected: none)"
+          diff <(cut -d= -f1 /tmp/env-plain.txt) <(cut -d= -f1 /tmp/env-wrapped.txt) && echo "same variable names"
+          cmp /tmp/env-plain.txt /tmp/env-wrapped.txt && echo "same values"
+          echo "=== exit status and signals"
+          bash scripts/ci/with-memory-cap.sh sh -c 'exit 7'; echo "exit=$? (expected 7)"
           true
-      - name: All plugin settings suites under the cap
+      - name: The real steps under the cap
         run: |
           set +e
+          npm run check:plugin-contract > /tmp/contract.log 2>&1; echo "contract exit=$?"
           bash scripts/ci/with-memory-cap.sh node --test --import tsx components/settings/tabs/Plugin*.test.tsx > /tmp/all.log 2>&1
-          code=$?
-          grep "^# \(tests\|pass\|fail\|cancelled\|duration_ms\)" /tmp/all.log
-          grep -n "^not ok" -B 45 /tmp/all.log | cut -c1-300 | head -150
-          echo "exit=$code"
-          true
-      - name: Virtualized list suites with the locked react-virtual
-        run: |
-          set +e
-          node -p "'react-virtual ' + require('@tanstack/react-virtual/package.json').version + ', virtual-core ' + require('@tanstack/virtual-core/package.json').version"
-          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/GlobalSftpTransferCenter.children-performance.test.tsx components/GlobalSftpTransferCenter.virtualization.test.tsx components/HostTreeView.orderUpdates.test.tsx > /tmp/virt-new.log 2>&1
-          echo "exit=$?"
-          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/virt-new.log | cut -c1-200
-          true
-      - name: The same suites with upstream's react-virtual
-        run: |
-          set +e
-          npm install --no-save --no-audit --no-fund @tanstack/react-virtual@3.14.8 @tanstack/virtual-core@3.17.6 > /tmp/install.log 2>&1 || tail -20 /tmp/install.log
-          node -p "'react-virtual ' + require('@tanstack/react-virtual/package.json').version + ', virtual-core ' + require('@tanstack/virtual-core/package.json').version"
-          bash scripts/ci/with-memory-cap.sh node --test --import tsx components/GlobalSftpTransferCenter.children-performance.test.tsx components/GlobalSftpTransferCenter.virtualization.test.tsx components/HostTreeView.orderUpdates.test.tsx > /tmp/virt-old.log 2>&1
-          echo "exit=$?"
-          grep "^ok\|^not ok\|^# \(tests\|pass\|fail\)" /tmp/virt-old.log | cut -c1-200
+          echo "plugin suites exit=$?"
+          grep "^not ok\|^# \(tests\|pass\|fail\|cancelled\|duration_ms\)" /tmp/all.log
           true
