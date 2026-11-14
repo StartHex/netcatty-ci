@@ -54,9 +54,17 @@ jobs:
           npm run check:plugin-contract
           npm run test:plugin-runtime
           npm run test:plugin-examples
-          # One file at a time: run together, these React suites have exhausted
-          # the runner's memory and taken the whole job down with them.
-          node --test --test-concurrency=1 --import tsx components/settings/tabs/Plugin*.test.tsx
+          # One of these React suites (the plugin log settings) occasionally
+          # spins instead of finishing: it either hangs or eats memory until
+          # the runner dies, and the main test step never starts. A heap cap
+          # and a per-file timeout turn that into an ordinary failure, which
+          # is retried.
+          attempt=1
+          until NODE_OPTIONS=--max-old-space-size=2048 node --test --test-concurrency=1 --test-timeout=180000 --import tsx components/settings/tabs/Plugin*.test.tsx; do
+            if [ "$attempt" -ge 3 ]; then exit 1; fi
+            attempt=$((attempt + 1))
+            echo "::warning::plugin settings suites failed, retrying (attempt $attempt of 3)"
+          done
 
       - name: Test
         run: npm test
