@@ -9,8 +9,6 @@ import { useI18n } from '../../application/i18n/I18nProvider';
 import {
   DATABASE_DEFAULT_PORTS,
   databaseDisplayTarget,
-  databaseEffectivePort,
-  sanitizeDatabaseConnection,
   type DatabaseConnection,
   type DatabaseKind,
   type JdbcDriver,
@@ -27,18 +25,15 @@ import {
   applyJdbcPresetTemplate,
   findJdbcPreset,
 } from '../../domain/database/jdbcPresets';
+import { databaseEncodingChoices, supportsClientEncoding } from '../../domain/database/encoding';
 import {
-  ON_HOST_AUTO_ENCODING,
-  databaseEncodingChoices,
-  supportsClientEncoding,
-} from '../../domain/database/encoding';
-import {
-  EMPTY_ON_HOST_FORM,
-  onHostFormFromSettings,
-  onHostFormProblem,
-  onHostSettingsFromForm,
-  type OnHostFormValue,
-} from '../../domain/database/onHostForm';
+  EMPTY_DATABASE_CONNECTION_FORM as EMPTY_FORM,
+  connectionFromForm,
+  formFromConnection,
+  formUsesAccount,
+  type DatabaseConnectionFormState as FormState,
+} from '../../domain/database/connectionForm';
+import { onHostFormProblem } from '../../domain/database/onHostForm';
 import { Button } from '../ui/button';
 import {
   Dialog,
@@ -60,6 +55,9 @@ const SSL_MODES: DatabaseSslMode[] = ['disable', 'require', 'verify-ca', 'verify
 
 const COLOR_TAGS: DatabaseColorTag[] = ['none', 'red', 'orange', 'yellow', 'green', 'blue', 'purple'];
 
+// The form's data lives in the domain layer; these stay importable from here.
+export { connectionFromForm, formFromConnection };
+
 const COLOR_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {
   red: 'border-transparent bg-red-500',
   orange: 'border-transparent bg-orange-500',
@@ -68,94 +66,6 @@ const COLOR_CLASS: Record<Exclude<DatabaseColorTag, 'none'>, string> = {
   blue: 'border-transparent bg-sky-500',
   purple: 'border-transparent bg-violet-500',
 };
-
-interface FormState {
-  label: string;
-  kind: DatabaseKind;
-  host: string;
-  port: string;
-  database: string;
-  username: string;
-  password: string;
-  savePassword: boolean;
-  readOnly: boolean;
-  sslMode: DatabaseSslMode;
-  initSql: string;
-  sqlitePath: string;
-  inMemory: boolean;
-  sshHostId: string;
-  jdbcUrl: string;
-  jdbcDriverClass: string;
-  jdbcDriverPaths: string[];
-  jdbcDriverId: string;
-  javaPath: string;
-  jdbcPresetId: string;
-  clientEncoding: string;
-  group: string;
-  colorTag: DatabaseColorTag;
-  /** The on-host kind's own fields; kept while another kind is selected. */
-  onHost: OnHostFormValue;
-}
-
-const EMPTY_FORM: FormState = {
-  label: '',
-  kind: 'postgresql',
-  host: '127.0.0.1',
-  port: String(DATABASE_DEFAULT_PORTS.postgresql),
-  database: '',
-  username: '',
-  password: '',
-  savePassword: true,
-  readOnly: false,
-  sslMode: 'disable',
-  initSql: '',
-  sqlitePath: '',
-  inMemory: false,
-  sshHostId: '',
-  jdbcUrl: '',
-  jdbcDriverClass: '',
-  jdbcDriverPaths: [],
-  jdbcDriverId: '',
-  javaPath: '',
-  jdbcPresetId: '',
-  clientEncoding: '',
-  group: '',
-  colorTag: 'none',
-  onHost: EMPTY_ON_HOST_FORM,
-};
-
-export function formFromConnection(connection: DatabaseConnection): FormState {
-  return {
-    label: connection.label,
-    kind: connection.kind,
-    host: connection.host ?? '127.0.0.1',
-    port: String(databaseEffectivePort(connection) ?? ''),
-    database: connection.database ?? '',
-    username: connection.username ?? '',
-    password: connection.password ?? '',
-    savePassword: connection.savePassword !== false,
-    readOnly: connection.readOnly === true,
-    sslMode: connection.sslMode ?? 'disable',
-    initSql: connection.initSql ?? '',
-    sqlitePath: connection.sqlitePath ?? '',
-    inMemory: connection.inMemory === true,
-    sshHostId: connection.sshHostId ?? '',
-    jdbcUrl: connection.jdbcUrl ?? '',
-    jdbcDriverClass: connection.jdbcDriverClass ?? '',
-    jdbcDriverPaths: connection.jdbcDriverPaths ?? [],
-    jdbcDriverId: connection.jdbcDriverId ?? '',
-    javaPath: connection.javaPath ?? '',
-    jdbcPresetId: '',
-    // The on-host driver's "automatic" is the form's default entry.
-    clientEncoding:
-      connection.kind === 'onhost' && connection.clientEncoding === ON_HOST_AUTO_ENCODING
-        ? ''
-        : connection.clientEncoding ?? '',
-    group: connection.group ?? '',
-    colorTag: connection.colorTag ?? 'none',
-    onHost: onHostFormFromSettings(connection.onHost),
-  };
-}
 
 /** "Testing connection… 3.2 s" — ticks on its own so the form does not re-render. */
 const TestElapsed: React.FC<{ startedAt?: number; format: (seconds: string) => string; fallback: string }> = ({
@@ -278,8 +188,7 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
   const isSqlite = form.kind === 'sqlite';
   const isJdbc = form.kind === 'jdbc';
   const isOnHost = form.kind === 'onhost';
-  // db.cfg mode logs in with what the host's own configuration says.
-  const usesAccount = !isSqlite && !(isOnHost && form.onHost.mode === 'config');
+  const usesAccount = formUsesAccount(form);
   const supportsEncoding = supportsClientEncoding(form.kind);
 
   const registeredDriver = useMemo(
@@ -287,45 +196,10 @@ export const DatabaseConnectionDialog: React.FC<DatabaseConnectionDialogProps> =
     [jdbcDrivers, form.jdbcDriverId],
   );
 
-  const draft = useMemo<DatabaseConnection>(() => {
-    const base = connection ?? { id: crypto.randomUUID(), createdAt: Date.now() };
-    return sanitizeDatabaseConnection({
-      ...base,
-      label: form.label.trim(),
-      kind: form.kind,
-      host: isSqlite || isOnHost ? undefined : form.host.trim(),
-      port: isSqlite || isOnHost ? undefined : Number(form.port) || undefined,
-      database: isSqlite || isOnHost ? undefined : form.database.trim() || undefined,
-      username: usesAccount ? form.username.trim() || undefined : undefined,
-      password: usesAccount && form.savePassword ? form.password : undefined,
-      savePassword: form.savePassword,
-      readOnly: form.readOnly,
-      sslMode: isSqlite || isOnHost ? undefined : form.sslMode,
-      initSql: form.initSql.trim() || undefined,
-      sqlitePath: isSqlite ? form.sqlitePath.trim() : undefined,
-      inMemory: isSqlite ? form.inMemory : undefined,
-      sshHostId: isSqlite ? undefined : form.sshHostId || undefined,
-      jdbcUrl: isJdbc ? form.jdbcUrl.trim() : undefined,
-      jdbcDriverId: isJdbc ? form.jdbcDriverId || undefined : undefined,
-      jdbcDriverClass: isJdbc
-        ? form.jdbcDriverClass.trim() || registeredDriver?.driverClass
-        : undefined,
-      jdbcDriverPaths: isJdbc
-        ? form.jdbcDriverPaths.length > 0
-          ? form.jdbcDriverPaths
-          : registeredDriver
-            ? registeredDriver.jarPaths?.length
-              ? registeredDriver.jarPaths
-              : [registeredDriver.jarPath]
-            : undefined
-        : undefined,
-      javaPath: isJdbc ? form.javaPath.trim() || undefined : undefined,
-      clientEncoding: supportsEncoding ? form.clientEncoding || undefined : undefined,
-      onHost: isOnHost ? onHostSettingsFromForm(form.onHost) : undefined,
-      group: form.group.trim() || undefined,
-      colorTag: form.colorTag === 'none' ? undefined : form.colorTag,
-    });
-  }, [connection, form, isJdbc, isOnHost, isSqlite, registeredDriver, supportsEncoding, usesAccount]);
+  const draft = useMemo<DatabaseConnection>(
+    () => connectionFromForm(form, connection ?? { id: crypto.randomUUID(), createdAt: Date.now() }, registeredDriver),
+    [connection, form, registeredDriver],
+  );
 
   const labelError = !draft.label;
   const onHostProblem = isOnHost
