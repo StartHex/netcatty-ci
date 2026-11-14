@@ -44,7 +44,14 @@ import {
 } from '../../infrastructure/services/databaseTunnelService';
 import type { DbConnectionTarget, DbTestConnectionResult } from '../../domain/models';
 import { useI18n } from '../i18n/I18nProvider';
-import { databaseTabStore, useDatabaseTabRequest } from './databaseTabStore';
+import { activeTabStore } from './activeTabStore';
+import { DatabaseTabRoster } from './databaseTabRoster';
+import {
+  databaseTabStore,
+  fromDatabaseTabId,
+  isDatabaseTabId,
+  useDatabaseTabRequest,
+} from './databaseTabStore';
 
 export type { DatabaseTunnelDeps } from '../../infrastructure/services/databaseTunnelService';
 export type { DbColumnInfo, DbTableRef } from '../../infrastructure/services/databaseService';
@@ -124,9 +131,16 @@ export interface UseDatabaseWorkbenchResult {
   tabs: DatabaseTab[];
   activeTabId: string | null;
   activeTab: DatabaseTab | undefined;
-  openTab: (connection: DatabaseConnection, options?: { forceNew?: boolean }) => Promise<string>;
+  /**
+   * Opens a tab on the connection (or returns the one it already has) and
+   * starts connecting. The id is there at once; the tab reports its own
+   * progress.
+   */
+  openTab: (connection: DatabaseConnection, options?: { forceNew?: boolean }) => string;
   closeTab: (tabId: string) => void;
   setActiveTabId: (tabId: string | null) => void;
+  /** Dials a restored tab that has not connected yet; any other tab is left alone. */
+  connectIfIdle: (tabId: string) => void;
   updateSql: (tabId: string, sql: string) => void;
   /** Remember which file the tab's SQL lives in (after open / save). */
   bindSqlFile: (tabId: string, filePath: string, savedSql: string) => void;
@@ -190,14 +204,21 @@ export function describeDatabaseError(
   return formatDatabaseError(error);
 }
 
+/**
+ * @param frontTabId The workbench tab the app is showing right now, or null
+ *   while another kind of tab (a terminal, the vault...) is in front.
+ */
 export function useDatabaseWorkbench(
   connections: DatabaseConnection[],
   tunnelDeps?: DatabaseTunnelDeps,
+  frontTabId: string | null = null,
 ): UseDatabaseWorkbenchResult {
   const { t } = useI18n();
   const [tabs, setTabs] = useState<DatabaseTab[]>([]);
   const [activeTabId, setActiveTabIdState] = useState<string | null>(null);
   const tabsRef = useRef<DatabaseTab[]>(tabs);
+  /** Tab membership as of right now; `tabsRef` only catches up on the next render. */
+  const rosterRef = useRef(new DatabaseTabRoster());
   /**
    * Per-tab run token. Cancel and every new run bump it, so a statement that
    * comes back after the user moved on is dropped instead of overwriting the
@@ -449,15 +470,29 @@ export function useDatabaseWorkbench(
       openSeqRef.current.set(tabId, seq);
       patchTab(tabId, { status: 'connecting', error: undefined, errorDetail: undefined });
       const connectEncoding = tabsRef.current.find((entry) => entry.id === tabId)?.clientEncoding;
+      // A tab closed while it was dialing: its close ran before there was a
+      // session or tunnel to close, so what this attempt opens has no owner.
+      const releaseIfAbandoned = () => {
+        if (rosterRef.current.has(tabId)) return;
+        if (rosterRef.current.isConnectionInUse(connection.id)) return;
+        void closeDatabaseConnection(connection.id);
+        void closeDatabaseTunnel(connection.id);
+      };
       try {
         const resolved = await resolveTarget(connection, connectEncoding);
-        if (openSeqRef.current.get(tabId) !== seq) return;
+        if (openSeqRef.current.get(tabId) !== seq) {
+          releaseIfAbandoned();
+          return;
+        }
         if (resolved.ok !== true) {
           patchTab(tabId, { status: 'error', connected: false, error: resolved.error });
           return;
         }
         const result = await openDatabaseConnection(resolved.target);
-        if (openSeqRef.current.get(tabId) !== seq) return;
+        if (openSeqRef.current.get(tabId) !== seq) {
+          releaseIfAbandoned();
+          return;
+        }
         if (!result.ok) {
           patchTab(tabId, {
             status: 'error',
@@ -487,18 +522,19 @@ export function useDatabaseWorkbench(
   );
 
   const openTab = useCallback(
-    async (
+    (
       connection: DatabaseConnection,
       options?: { forceNew?: boolean; sql?: string; maxRows?: number },
-    ) => {
-      const existing = options?.forceNew
+    ): string => {
+      const existingId = options?.forceNew
         ? undefined
-        : tabsRef.current.find((tab) => tab.connectionId === connection.id);
-      if (existing) {
-        setActiveTabIdState(existing.id);
-        return existing.id;
+        : rosterRef.current.findByConnection(connection.id);
+      if (existingId) {
+        setActiveTabIdState(existingId);
+        return existingId;
       }
       const id = crypto.randomUUID();
+      rosterRef.current.add(id, connection.id);
       setTabs((prev) => [
         ...prev,
         {
@@ -514,17 +550,24 @@ export function useDatabaseWorkbench(
         },
       ]);
       setActiveTabIdState(id);
-      await connectTab(id, connection);
+      // The tab exists from here on and shows its own progress; whoever asked
+      // for it is not kept waiting on the dial (which can take as long as a
+      // tunnel through a jump host does).
+      void connectTab(id, connection);
       return id;
     },
     [connectTab],
   );
 
   const closeTab = useCallback((tabId: string) => {
-    const tab = tabsRef.current.find((entry) => entry.id === tabId);
+    const connectionId = rosterRef.current.connectionOf(tabId);
+    const wasRunning = runningRef.current.has(tabId);
+    const wasOpen = rosterRef.current.remove(tabId);
     runTokensRef.current.delete(tabId);
     runningRef.current.delete(tabId);
     structureTokensRef.current.delete(tabId);
+    // Invalidates a dial still in flight; see `releaseIfAbandoned`.
+    openSeqRef.current.delete(tabId);
     setTabs((prev) => {
       const next = prev.filter((entry) => entry.id !== tabId);
       setActiveTabIdState((current) => {
@@ -533,19 +576,17 @@ export function useDatabaseWorkbench(
       });
       return next;
     });
-    if (!tab) return;
+    if (!wasOpen || !connectionId) return;
     // Tabs opened with "new tab" share one pooled session (and tunnel) per
     // connection: closing one of them must not kill the others' session or
-    // their open transaction.
-    const stillUsed = tabsRef.current.some(
-      (entry) => entry.id !== tabId && entry.connectionId === tab.connectionId,
-    );
-    if (stillUsed) {
-      if (tab.running) void cancelDatabaseQuery(tab.connectionId);
+    // their open transaction. The roster is asked rather than the rendered
+    // list, so several closes in a row each see the ones before them.
+    if (rosterRef.current.isConnectionInUse(connectionId)) {
+      if (wasRunning) void cancelDatabaseQuery(connectionId);
       return;
     }
-    void closeDatabaseConnection(tab.connectionId);
-    void closeDatabaseTunnel(tab.connectionId);
+    void closeDatabaseConnection(connectionId);
+    void closeDatabaseTunnel(connectionId);
   }, []);
 
   const updateSql = useCallback(
@@ -1068,7 +1109,7 @@ export function useDatabaseWorkbench(
   );
 
   // Hydrate persisted tabs once connections are available. Restored tabs stay
-  // disconnected until the user activates them.
+  // disconnected until one of them is actually shown (see `connectIfIdle`).
   const hydrateGuardRef = useRef(false);
   useEffect(() => {
     if (hydrateGuardRef.current) return;
@@ -1098,6 +1139,7 @@ export function useDatabaseWorkbench(
       })
       .filter((tab): tab is DatabaseTab => tab !== null);
     if (restored.length === 0) return;
+    if (rosterRef.current.size === 0) rosterRef.current.reset(restored);
     setTabs((prev) => (prev.length === 0 ? restored : prev));
     const persistedActive = persisted.activeTabId;
     setActiveTabIdState((current) =>
@@ -1151,21 +1193,35 @@ export function useDatabaseWorkbench(
     };
   }, []);
 
+  // A tab asked for from the vault list, the quick switcher or "copy tab" comes
+  // to the front the moment it exists, the way a host tab does: connecting is
+  // shown in the tab, it does not hold the app on the page it was asked from
+  // (and does not pull the user back to it whenever the dial finally ends).
+  const bringToFront = useCallback((tabId: string) => {
+    setActiveTabIdState(tabId);
+    databaseTabStore.activate(tabId);
+    databaseTabStore.markActive(tabId);
+  }, []);
+
   // Requests raised by the vault list / tab bar (open or close).
   const tabRequest = useDatabaseTabRequest();
   useEffect(() => {
     if (!tabRequest) return;
-    databaseTabStore.clearRequest(tabRequest.nonce);
+    // Taking it makes this the only run that acts on the request, and brings
+    // the next one in line forward ("close all" queues one per tab).
+    if (!databaseTabStore.takeRequest(tabRequest.nonce)) return;
     if (tabRequest.type === 'open') {
       const connection = connectionsRef.current.find((item) => item.id === tabRequest.connectionId);
       if (!connection) return;
-      void openTab(connection, { forceNew: tabRequest.forceNew }).then((id) => {
-        setActiveTabIdState(id);
-        databaseTabStore.activate(id);
-        databaseTabStore.markActive(id);
-      });
+      bringToFront(openTab(connection, { forceNew: tabRequest.forceNew }));
     } else if (tabRequest.type === 'close') {
       closeTab(tabRequest.tabId);
+      // The tab bar has already chosen what comes to the front. When that is
+      // another of our tabs, show it now rather than our own pick for a frame.
+      const front = activeTabStore.getActiveTabId();
+      if (isDatabaseTabId(front) && rosterRef.current.has(fromDatabaseTabId(front))) {
+        setActiveTabIdState(fromDatabaseTabId(front));
+      }
     } else if (tabRequest.type === 'duplicate') {
       const source = tabsRef.current.find((entry) => entry.id === tabRequest.tabId);
       const connection = source
@@ -1174,23 +1230,38 @@ export function useDatabaseWorkbench(
       if (!source || !connection) return;
       // Same connection (shared session), same SQL draft and row cap; results
       // and transaction state stay with the original tab.
-      void openTab(connection, { forceNew: true, sql: source.sql, maxRows: source.maxRows }).then((id) => {
-        setActiveTabIdState(id);
-        databaseTabStore.activate(id);
-        databaseTabStore.markActive(id);
-      });
+      bringToFront(openTab(connection, { forceNew: true, sql: source.sql, maxRows: source.maxRows }));
     }
-  }, [tabRequest, openTab, closeTab]);
+  }, [tabRequest, openTab, closeTab, bringToFront]);
 
-  // A restored tab connects lazily the first time it becomes active.
+  // The tab the app shows is the tab the workbench shows.
   useEffect(() => {
-    if (!activeTabId) return;
-    const tab = tabsRef.current.find((entry) => entry.id === activeTabId);
-    if (!tab || tab.status !== 'idle') return;
-    const connection = connectionsRef.current.find((entry) => entry.id === tab.connectionId);
-    if (!connection) return;
-    void connectTab(activeTabId, connection);
-  }, [activeTabId, connectTab]);
+    if (!frontTabId) return;
+    setActiveTabIdState(frontTabId);
+    databaseTabStore.markActive(frontTabId);
+  }, [frontTabId]);
+
+  // Restored tabs dial the first time they are on screen. Restoring the list
+  // must not: a database behind a jump host or a bastion login would be dialed
+  // (and could raise its prompts) just because the app started.
+  const lazyDialedRef = useRef(new Set<string>());
+  const connectIfIdle = useCallback(
+    (tabId: string) => {
+      if (lazyDialedRef.current.has(tabId)) return;
+      const tab = tabsRef.current.find((entry) => entry.id === tabId);
+      if (!tab || tab.status !== 'idle') return;
+      const connection = connectionsRef.current.find((entry) => entry.id === tab.connectionId);
+      if (!connection) return;
+      lazyDialedRef.current.add(tabId);
+      void connectTab(tabId, connection);
+    },
+    [connectTab],
+  );
+  const frontTabIdle = Boolean(frontTabId)
+    && tabs.some((tab) => tab.id === frontTabId && tab.status === 'idle');
+  useEffect(() => {
+    if (frontTabId && frontTabIdle) connectIfIdle(frontTabId);
+  }, [frontTabId, frontTabIdle, connectIfIdle]);
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
@@ -1207,6 +1278,7 @@ export function useDatabaseWorkbench(
     openTab,
     closeTab,
     setActiveTabId,
+    connectIfIdle,
     updateSql,
     bindSqlFile,
     runQuery,
