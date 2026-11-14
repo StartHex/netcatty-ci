@@ -33,8 +33,13 @@ test('local logging controls default off, disclose verbose risk, and call host-o
   const switches = () => [...document.querySelectorAll<HTMLButtonElement>('[role="switch"]')];
   try {
     await act(async () => root.render(<React.StrictMode><I18nProvider locale="en"><PluginLogSettings /></I18nProvider></React.StrictMode>));
-    assert.equal(document.querySelector('[role=dialog]'), null);
-    assert.equal(document.querySelector('input[type=checkbox]'), null);
+    // DOM nodes are compared to a boolean here on purpose. A failing
+    // assert.equal(node, ...) makes Node inspect the node to print a diff, and
+    // a mounted node drags the whole React tree and the jsdom window with it:
+    // gigabytes of text, enough to take the CI runner down instead of
+    // reporting the failure.
+    assert.equal(document.querySelector('[role=dialog]') === null, true, 'no dialog before Configure');
+    assert.equal(document.querySelector('input[type=checkbox]') === null, true, 'switches, not checkboxes');
     const configure = button('Configure');
     configure.focus();
     await act(async () => configure.click());
@@ -65,8 +70,14 @@ test('local logging controls default off, disclose verbose risk, and call host-o
     assert.equal(switches()[1].getAttribute('aria-checked'), 'false');
     assert.match(document.querySelector('[role=alert]')!.textContent!, /synthetic preferences write failed/);
     await act(async () => button('Close').click());
-    assert.equal(document.querySelector('[role=dialog]'), null);
-    assert.equal(document.activeElement, configure);
+    assert.equal(document.querySelector('[role=dialog]') === null, true, 'the dialog closes');
+    // The dialog hands focus back from a timer that it starts while it
+    // unmounts. Whether that timer ran before act() returned was a coin toss,
+    // so wait for it instead of racing it.
+    for (let turn = 0; turn < 40 && document.activeElement !== configure; turn += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+    }
+    assert.equal(document.activeElement === configure, true, 'focus returns to the Configure button');
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
